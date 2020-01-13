@@ -831,6 +831,9 @@ static long vfio_pci_ioctl(void *device_data,
 		if (vdev->reset_works)
 			info.flags |= VFIO_DEVICE_FLAGS_RESET;
 
+		if (dev_is_keepalive(&vdev->pdev->dev))
+			info.flags |= VFIO_DEVICE_FLAGS_KEEPALIVE;
+
 		info.num_regions = VFIO_PCI_NUM_REGIONS + vdev->num_regions;
 		info.num_irqs = VFIO_PCI_NUM_IRQS;
 
