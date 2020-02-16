@@ -3991,11 +3991,11 @@ static int vmx_deliver_posted_interrupt(struct kvm_vcpu *vcpu, int vector)
 	if (!vcpu->arch.apicv_active)
 		return -1;
 
-	if (pi_test_and_set_pir(vector, &vmx->pi_desc))
+	if (pi_test_and_set_pir(vector, vmx->pi_desc))
 		return 0;
 
 	/* If a previous notification has sent the IPI, nothing to do.  */
-	if (pi_test_and_set_on(&vmx->pi_desc))
+	if (pi_test_and_set_on(vmx->pi_desc))
 		return 0;
 
 	if (vcpu != kvm_get_running_vcpu() &&
@@ -4319,7 +4319,7 @@ static void init_vmcs(struct vcpu_vmx *vmx)
 		vmcs_write16(GUEST_INTR_STATUS, 0);
 
 		vmcs_write16(POSTED_INTR_NV, POSTED_INTR_VECTOR);
-		vmcs_write64(POSTED_INTR_DESC_ADDR, __pa((&vmx->pi_desc)));
+		vmcs_write64(POSTED_INTR_DESC_ADDR, __pa(vmx->pi_desc));
 	}
 
 	if (!kvm_pause_in_guest(vmx->vcpu.kvm)) {
@@ -6301,15 +6301,15 @@ static int vmx_sync_pir_to_irr(struct kvm_vcpu *vcpu)
 	bool max_irr_updated;
 
 	WARN_ON(!vcpu->arch.apicv_active);
-	if (pi_test_on(&vmx->pi_desc)) {
-		pi_clear_on(&vmx->pi_desc);
+	if (pi_test_on(vmx->pi_desc)) {
+		pi_clear_on(vmx->pi_desc);
 		/*
 		 * IOMMU can write to PID.ON, so the barrier matters even on UP.
 		 * But on x86 this is just a compiler barrier anyway.
 		 */
 		smp_mb__after_atomic();
 		max_irr_updated =
-			kvm_apic_update_irr(vcpu, vmx->pi_desc.pir, &max_irr);
+			kvm_apic_update_irr(vcpu, vmx->pi_desc->pir, &max_irr);
 
 		/*
 		 * If we are running L2 and L1 has a new pending interrupt
@@ -6347,8 +6347,8 @@ static void vmx_apicv_post_state_restore(struct kvm_vcpu *vcpu)
 {
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
 
-	pi_clear_on(&vmx->pi_desc);
-	memset(vmx->pi_desc.pir, 0, sizeof(vmx->pi_desc.pir));
+	pi_clear_on(vmx->pi_desc);
+	memset(vmx->pi_desc->pir, 0, sizeof(vmx->pi_desc->pir));
 }
 
 void vmx_do_interrupt_nmi_irqoff(unsigned long entry);
@@ -6831,17 +6831,24 @@ static void vmx_free_vcpu(struct kvm_vcpu *vcpu)
 	free_vpid(vmx->vpid);
 	nested_vmx_free_vcpu(vcpu);
 	free_loaded_vmcs(vmx->loaded_vmcs);
+	free_page((unsigned long)vmx->pi_desc);
 }
 
 static int vmx_create_vcpu(struct kvm_vcpu *vcpu)
 {
 	struct vcpu_vmx *vmx;
 	int i, cpu, err;
+	struct page *page;
 
 	BUILD_BUG_ON(offsetof(struct vcpu_vmx, vcpu) != 0);
 	vmx = to_vmx(vcpu);
 
 	err = -ENOMEM;
+
+	page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+	if (!page)
+		return err;
+	vmx->pi_desc = page_address(page);
 
 	vmx->vpid = allocate_vpid();
 
@@ -6944,8 +6951,8 @@ static int vmx_create_vcpu(struct kvm_vcpu *vcpu)
 	 * Enforce invariant: pi_desc.nv is always either POSTED_INTR_VECTOR
 	 * or POSTED_INTR_WAKEUP_VECTOR.
 	 */
-	vmx->pi_desc.nv = POSTED_INTR_VECTOR;
-	vmx->pi_desc.sn = 1;
+	vmx->pi_desc->nv = POSTED_INTR_VECTOR;
+	vmx->pi_desc->sn = 1;
 
 	vmx->ept_pointer = INVALID_PAGE;
 
@@ -6957,6 +6964,8 @@ free_pml:
 	vmx_destroy_pml_buffer(vmx);
 free_vpid:
 	free_vpid(vmx->vpid);
+	free_page((unsigned long)vmx->pi_desc);
+	vmx->pi_desc = NULL;
 	return err;
 }
 
