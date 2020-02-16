@@ -18,7 +18,7 @@ static DEFINE_PER_CPU(spinlock_t, blocked_vcpu_on_cpu_lock);
 
 static inline struct pi_desc *vcpu_to_pi_desc(struct kvm_vcpu *vcpu)
 {
-	return &(to_vmx(vcpu)->pi_desc);
+	return to_vmx(vcpu)->pi_desc;
 }
 
 void vmx_vcpu_pi_load(struct kvm_vcpu *vcpu, int cpu)
