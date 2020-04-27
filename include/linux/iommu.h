@@ -87,7 +87,19 @@ struct iommu_domain {
 	void *handler_token;
 	struct iommu_domain_geometry geometry;
 	void *iova_cookie;
+	bool keepalive;
 };
+
+static inline void iommu_domain_set_keepalive(struct iommu_domain *domain,
+					      bool keepalive)
+{
+	domain->keepalive = keepalive;
+}
+
+static inline bool iommu_domain_is_keepalive(struct iommu_domain *domain)
+{
+	return domain->keepalive;
+}
 
 enum iommu_cap {
 	IOMMU_CAP_CACHE_COHERENCY,	/* IOMMU can enforce cache coherent DMA
