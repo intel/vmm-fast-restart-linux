@@ -2109,6 +2109,9 @@ static int vfio_iommu_type1_attach_group(void *iommu_data,
 			goto out_domain;
 	}
 
+	if (iommu->keepalive)
+		iommu_domain_set_keepalive(domain->domain, true);
+
 	ret = vfio_iommu_attach_group(domain, group);
 	if (ret)
 		goto out_domain;
@@ -2175,6 +2178,10 @@ static int vfio_iommu_type1_attach_group(void *iommu_data,
 	 * testing if they're on the same bus_type.
 	 */
 	list_for_each_entry(d, &iommu->domain_list, next) {
+		if (iommu_domain_is_keepalive(d->domain) !=
+		    iommu_domain_is_keepalive(domain->domain))
+			continue;
+
 		if (d->domain->ops == domain->domain->ops &&
 		    d->prot == domain->prot) {
 			vfio_iommu_detach_group(domain, group);
@@ -2893,9 +2900,13 @@ static int vfio_iommu_type1_set_keepalive(void *iommu_data,
 					  struct vfio_keepalive_data *vka)
 {
 	struct vfio_iommu *iommu = iommu_data;
+	struct vfio_domain *d;
 	int ret;
 
 	mutex_lock(&iommu->lock);
+
+	list_for_each_entry(d, &iommu->domain_list, next)
+		iommu_domain_set_keepalive(d->domain, !!vka->keepalive);
 
 	iommu->keepalive = !!vka->keepalive;
 	ret = 0;
