@@ -860,6 +860,35 @@ static size_t unmap_unpin_slow(struct vfio_domain *domain,
 	return unmapped;
 }
 
+static long vfio_keepalive_unmap_unpin(struct vfio_iommu *iommu,
+				       struct vfio_dma *dma,
+				       bool do_accounting)
+{
+	dma_addr_t iova = dma->iova, end = dma->iova + dma->size;
+	struct vfio_domain *domain;
+	phys_addr_t phys;
+	long unlocked = 0;
+
+	domain = list_first_entry(&iommu->domain_list,
+				  struct vfio_domain, next);
+	while (iova < end) {
+		phys = iommu_iova_to_phys(domain->domain, iova);
+		if (WARN_ON(!phys)) {
+			iova += PAGE_SIZE;
+			continue;
+		}
+		if (!is_invalid_reserved_pfn(phys >> PAGE_SHIFT))
+			unlocked++;
+		iova += PAGE_SIZE;
+	}
+	dma->iommu_mapped = false;
+	if (do_accounting) {
+		vfio_lock_acct(dma, -unlocked, true);
+		return 0;
+	}
+	return unlocked;
+}
+
 static long vfio_unmap_unpin(struct vfio_iommu *iommu, struct vfio_dma *dma,
 			     bool do_accounting)
 {
@@ -875,6 +904,12 @@ static long vfio_unmap_unpin(struct vfio_iommu *iommu, struct vfio_dma *dma,
 
 	if (!IS_IOMMU_CAP_DOMAIN_IN_CONTAINER(iommu))
 		return 0;
+
+	if (!dma->iommu_mapped)
+		return 0;
+
+	if (iommu->keepalive && (dma->prot & IOMMU_KEEPALIVE))
+		return vfio_keepalive_unmap_unpin(iommu, dma, do_accounting);
 
 	/*
 	 * We use the IOMMU to track the physical addresses, otherwise we'd
@@ -944,14 +979,19 @@ static long vfio_unmap_unpin(struct vfio_iommu *iommu, struct vfio_dma *dma,
 	return unlocked;
 }
 
-static void vfio_remove_dma(struct vfio_iommu *iommu, struct vfio_dma *dma)
+static void __vfio_remove_dma(struct vfio_iommu *iommu, struct vfio_dma *dma)
 {
-	vfio_unmap_unpin(iommu, dma, true);
 	vfio_unlink_dma(iommu, dma);
 	put_task_struct(dma->task);
 	vfio_dma_bitmap_free(dma);
 	kfree(dma);
 	iommu->dma_avail++;
+}
+
+static void vfio_remove_dma(struct vfio_iommu *iommu, struct vfio_dma *dma)
+{
+	vfio_unmap_unpin(iommu, dma, true);
+	__vfio_remove_dma(iommu, dma);
 }
 
 static void vfio_update_pgsize_bitmap(struct vfio_iommu *iommu)
@@ -1197,7 +1237,10 @@ again:
 		}
 
 		unmapped += dma->size;
-		vfio_remove_dma(iommu, dma);
+		if (iommu->keepalive)
+			__vfio_remove_dma(iommu, dma);
+		else
+			vfio_remove_dma(iommu, dma);
 	}
 
 unlock:
@@ -1235,6 +1278,48 @@ unwind:
 	return ret;
 }
 
+static int vfio_keepalive_pin_map_dma(struct vfio_iommu *iommu,
+				      struct vfio_dma *dma, size_t map_size)
+{
+	unsigned long pfn, limit = rlimit(RLIMIT_MEMLOCK) >> PAGE_SHIFT;
+	long ret, lock_acct = 0;
+	unsigned long vaddr;
+	dma_addr_t iova;
+	size_t size;
+	bool rsvd;
+
+	/* This code path is only user initiated */
+	if (!current->mm)
+		return -ENODEV;
+
+	for (vaddr = dma->vaddr, iova = dma->iova, size = map_size;
+	     size;
+	     vaddr += PAGE_SIZE, iova += PAGE_SIZE, size -= PAGE_SIZE) {
+		ret = vaddr_get_pfn(current->mm, vaddr, dma->prot, &pfn);
+		if (ret)
+			return ret;
+
+		rsvd = is_invalid_reserved_pfn(pfn);
+		if (rsvd || vfio_find_vpfn(dma, iova))
+			continue;
+
+		if (!dma->lock_cap && current->mm->locked_vm + 1 > limit) {
+			pr_warn("%s: RLIMIT_MEMLOCK (%ld) exceeded\n", __func__,
+					limit << PAGE_SHIFT);
+			return -ENOMEM;
+		}
+
+		lock_acct++;
+
+		if (size == map_size && unlikely(disable_hugepages))
+			break;
+	}
+
+	ret = vfio_lock_acct(dma, lock_acct, false);
+
+	return ret;
+}
+
 static int vfio_pin_map_dma(struct vfio_iommu *iommu, struct vfio_dma *dma,
 			    size_t map_size)
 {
@@ -1244,6 +1329,9 @@ static int vfio_pin_map_dma(struct vfio_iommu *iommu, struct vfio_dma *dma,
 	long npage;
 	unsigned long pfn, limit = rlimit(RLIMIT_MEMLOCK) >> PAGE_SHIFT;
 	int ret = 0;
+
+	if (iommu->keepalive && (dma->prot & IOMMU_KEEPALIVE))
+		return vfio_keepalive_pin_map_dma(iommu, dma, map_size);
 
 	while (size) {
 		/* Pin a contiguous chunk of memory */
@@ -1397,7 +1485,7 @@ static int vfio_dma_do_map(struct vfio_iommu *iommu,
 	vfio_link_dma(iommu, dma);
 
 	/* Don't pin and map if container doesn't contain IOMMU capable domain*/
-	if (!IS_IOMMU_CAP_DOMAIN_IN_CONTAINER(iommu))
+	if (!IS_IOMMU_CAP_DOMAIN_IN_CONTAINER(iommu) || iommu->keepalive)
 		dma->size = size;
 	else
 		ret = vfio_pin_map_dma(iommu, dma, size);
@@ -2210,10 +2298,12 @@ static int vfio_iommu_type1_attach_group(void *iommu_data,
 	 */
 	domain->fgsp = iommu_capable(bus, IOMMU_CAP_FGSP);
 
-	/* replay mappings on new domains */
-	ret = vfio_iommu_replay(iommu, domain);
-	if (ret)
-		goto out_detach;
+	if (!iommu->keepalive) {
+		/* replay mappings on new domains */
+		ret = vfio_iommu_replay(iommu, domain);
+		if (ret)
+			goto out_detach;
+	}
 
 	if (resv_msi) {
 		ret = iommu_get_msi_cookie(domain->domain, resv_msi_base);
@@ -2896,6 +2986,32 @@ out_unlock:
 	return -EINVAL;
 }
 
+static int vfio_iommu_keepalive_replay(struct vfio_iommu *iommu)
+{
+	struct rb_node *n;
+	int ret;
+
+	n = rb_first(&iommu->dma_list);
+	for (; n; n = rb_next(n)) {
+		struct vfio_dma *dma;
+		size_t size;
+
+		dma = rb_entry(n, struct vfio_dma, node);
+		if (dma->iommu_mapped)
+			continue;
+
+		size = dma->size;
+		dma->size = 0;
+		ret = vfio_pin_map_dma(iommu, dma, size);
+		if (ret) {
+			vfio_iommu_unmap_unpin_all(iommu);
+			return ret;
+		}
+		dma->iommu_mapped = true;
+	}
+	return 0;
+}
+
 static int vfio_iommu_type1_set_keepalive(void *iommu_data,
 					  struct vfio_keepalive_data *vka)
 {
@@ -2905,11 +3021,20 @@ static int vfio_iommu_type1_set_keepalive(void *iommu_data,
 
 	mutex_lock(&iommu->lock);
 
+	if (!vka->keepalive && iommu->keepalive) {
+		ret = vfio_iommu_keepalive_replay(iommu);
+		if (ret) {
+			pr_warn("keepalive: failed to replay DMA mappings\n");
+			goto iommu_keepalive_unlock;
+		}
+	}
+
 	list_for_each_entry(d, &iommu->domain_list, next)
 		iommu_domain_set_keepalive(d->domain, !!vka->keepalive);
 
 	iommu->keepalive = !!vka->keepalive;
 	ret = 0;
+iommu_keepalive_unlock:
 	mutex_unlock(&iommu->lock);
 	return ret;
 }
