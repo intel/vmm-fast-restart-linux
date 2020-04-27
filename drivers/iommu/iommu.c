@@ -2256,7 +2256,8 @@ static int __iommu_attach_group(struct iommu_domain *domain,
 {
 	int ret;
 
-	if (group->default_domain && group->domain != group->default_domain)
+	if (group->default_domain && group->domain != group->default_domain &&
+	    !iommu_domain_is_keepalive(domain))
 		return -EBUSY;
 
 	ret = __iommu_group_for_each_dev(group, domain,
@@ -2293,7 +2294,7 @@ static void __iommu_detach_group(struct iommu_domain *domain,
 {
 	int ret;
 
-	if (!group->default_domain) {
+	if (!group->default_domain || iommu_domain_is_keepalive(domain)) {
 		__iommu_group_for_each_dev(group, domain,
 					   iommu_group_do_detach_device);
 		group->domain = NULL;
