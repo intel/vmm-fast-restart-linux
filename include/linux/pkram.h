@@ -11,6 +11,7 @@ struct pkram_node;
 struct pkram_stream {
 	gfp_t gfp_mask;
 	struct pkram_node *node;
+	struct pkram_obj *obj;
 };
 
 #define PKRAM_NAME_MAX		256	/* including nul */
