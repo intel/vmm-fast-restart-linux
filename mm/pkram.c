@@ -1227,3 +1227,14 @@ static int __init pkram_reserve_page_ranges(pgd_t *pgd)
 
 	return err;
 }
+
+void pkram_free_pgt(void)
+{
+	if (!pkram_pgd)
+		return;
+
+	pkram_free_pgt_walk_pgd(pkram_pgd);
+
+	__free_pages_core(virt_to_page(pkram_pgd), 0);
+	pkram_pgd = NULL;
+}
