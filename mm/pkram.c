@@ -1499,3 +1499,28 @@ phys_addr_t __init_memblock pkram_memblock_find_in_range(phys_addr_t start,
 
 	return st.retval;
 }
+
+static int pkram_has_preserved_pages_cb(struct pkram_pg_state *st, unsigned long base, unsigned long size)
+{
+	st->retval = 1;
+	return 1;
+}
+
+/*
+ * Check whether the memory range [start, end) contains preserved pages.
+ */
+int pkram_has_preserved_pages(unsigned long start, unsigned long end)
+{
+	struct pkram_pg_state st = {
+		.range_cb = pkram_has_preserved_pages_cb,
+		.min_addr = start,
+		.max_addr = end,
+	};
+
+	if (!pkram_pgd)
+		return 0;
+
+	pkram_walk_pgt_rev(&st, pkram_pgd);
+
+	return st.retval;
+}
