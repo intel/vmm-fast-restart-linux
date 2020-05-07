@@ -94,6 +94,7 @@ struct pkram_node {
  */
 struct pkram_super_block {
 	__u64	node_pfn;		/* first element of the node list */
+	__u64	pgd_pfn;
 };
 
 static unsigned long pkram_sb_pfn __initdata;
@@ -769,15 +770,20 @@ static void __pkram_reboot(void)
 	struct page *page;
 	struct pkram_node *node;
 	unsigned long node_pfn = 0;
+	unsigned long pgd_pfn = 0;
 
-	list_for_each_entry_reverse(page, &pkram_nodes, lru) {
-		node = page_address(page);
-		if (WARN_ON(node->flags & PKRAM_ACCMODE_MASK))
-			continue;
-		node->node_pfn = node_pfn;
-		node_pfn = page_to_pfn(page);
+	if (pkram_pgd) {
+		list_for_each_entry_reverse(page, &pkram_nodes, lru) {
+			node = page_address(page);
+			if (WARN_ON(node->flags & PKRAM_ACCMODE_MASK))
+				continue;
+			node->node_pfn = node_pfn;
+			node_pfn = page_to_pfn(page);
+		}
+		pgd_pfn = page_to_pfn(virt_to_page(pkram_pgd));
 	}
 	pkram_sb->node_pfn = node_pfn;
+	pkram_sb->pgd_pfn = pgd_pfn;
 }
 
 static int pkram_reboot(struct notifier_block *notifier,
