@@ -1238,3 +1238,54 @@ void pkram_free_pgt(void)
 	__free_pages_core(virt_to_page(pkram_pgd), 0);
 	pkram_pgd = NULL;
 }
+
+static int __init_memblock pkram_memblock_find_cb(struct pkram_pg_state *st, unsigned long base, unsigned long size)
+{
+	unsigned long end = base + size;
+	unsigned long addr;
+
+	if (size < st->min_size)
+		return 0;
+
+	addr =  memblock_find_in_range(base, end, st->min_size, PAGE_SIZE);
+	if (!addr)
+		return 0;
+
+	st->retval = addr;
+	return 1;
+}
+
+/*
+ * It may be necessary to allocate a larger reserved memblock array
+ * while populating it with ranges of preserved pages.  To avoid
+ * trampling preserved pages that have not yet been added to the
+ * memblock reserved list this function implements a wrapper around
+ * memblock_find_in_range() that restricts searches to subranges
+ * that do not contain preserved pages.
+ */
+phys_addr_t __init_memblock pkram_memblock_find_in_range(phys_addr_t start,
+					phys_addr_t end, phys_addr_t size,
+					phys_addr_t align)
+{
+	struct pkram_pg_state st = {
+		.range_cb = pkram_memblock_find_cb,
+		.min_addr = start,
+		.max_addr = end,
+		.min_size = PAGE_ALIGN(size),
+		.find_holes = true,
+	};
+
+	if (!pkram_reservation_in_progress)
+		return memblock_find_in_range(start, end, size, align);
+
+	if (!pkram_pgd) {
+		WARN_ONCE(1, "No preserved pages pagetable\n");
+		return memblock_find_in_range(start, end, size, align);
+	}
+
+	WARN_ONCE(memblock_bottom_up(), "PKRAM: bottom up memblock allocation not yet supported\n");
+
+	pkram_walk_pgt_rev(&st, pkram_pgd);
+
+	return st.retval;
+}
