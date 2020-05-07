@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/err.h>
 #include <linux/gfp.h>
+#include <linux/highmem.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/list.h>
@@ -42,6 +43,8 @@ struct pkram_link {
 	((PAGE_SIZE-sizeof(struct pkram_link))/sizeof(pkram_entry_t))
 
 struct pkram_obj {
+	__u64	data_pfn;	/* points to the byte data */
+	__u64	data_len;	/* byte data size */
 	__u64	link_pfn;	/* points to the first link of the object */
 	__u64	obj_pfn;	/* points to the next object in the list */
 };
@@ -407,6 +410,9 @@ void pkram_finish_load_obj(struct pkram_stream *ps)
 		}
 	}
 
+	if (ps->data_page)
+		pkram_free_page(page_address(ps->data_page));
+
 	pkram_truncate_obj(obj);
 	pkram_free_page(obj);
 }
@@ -421,6 +427,9 @@ void pkram_finish_load(struct pkram_stream *ps)
 	struct pkram_node *node = ps->node;
 
 	BUG_ON((node->flags & PKRAM_ACCMODE_MASK) != PKRAM_LOAD);
+
+	if (ps->data_page)
+		put_page(ps->data_page);
 
 	pkram_truncate_node(node);
 	pkram_free_page(node);
@@ -581,10 +590,41 @@ struct page *pkram_load_page(struct pkram_stream *ps, unsigned long *index, shor
  *
  * On success, returns the number of bytes written, which is always equal to
  * @count. On failure, -errno is returned.
+ *
+ * Error values:
+ *    %ENOMEM: insufficient amount of memory available
  */
 ssize_t pkram_write(struct pkram_stream *ps, const void *buf, size_t count)
 {
-	return -ENOSYS;
+	struct pkram_node *node = ps->node;
+	struct pkram_obj *obj = ps->obj;
+	void *addr;
+
+	BUG_ON((node->flags & PKRAM_ACCMODE_MASK) != PKRAM_SAVE);
+
+	if (!ps->data_page) {
+		struct page *page;
+
+		page = pkram_alloc_page((ps->gfp_mask & GFP_RECLAIM_MASK) |
+				       __GFP_HIGHMEM | __GFP_ZERO);
+		if (!page)
+			return -ENOMEM;
+
+		ps->data_page = page;
+		ps->data_offset = 0;
+		obj->data_pfn = page_to_pfn(page);
+	}
+
+	BUG_ON(count > PAGE_SIZE - ps->data_offset);
+
+	addr = kmap_atomic(ps->data_page);
+	memcpy(addr + ps->data_offset, buf, count);
+	kunmap_atomic(addr);
+
+	obj->data_len += count;
+	ps->data_offset += count;
+
+	return count;
 }
 
 /**
@@ -597,5 +637,45 @@ ssize_t pkram_write(struct pkram_stream *ps, const void *buf, size_t count)
  */
 size_t pkram_read(struct pkram_stream *ps, void *buf, size_t count)
 {
-	return 0;
+	struct pkram_node *node = ps->node;
+	struct pkram_obj *obj = ps->obj;
+	size_t copy_count;
+	char *addr;
+
+	BUG_ON((node->flags & PKRAM_ACCMODE_MASK) != PKRAM_LOAD);
+
+	if (!count || !obj->data_len)
+		return 0;
+
+	if (!ps->data_page) {
+		struct page *page;
+
+		page = pfn_to_page(obj->data_pfn);
+		if (!page)
+			return 0;
+
+		ps->data_page = page;
+		ps->data_offset = 0;
+		obj->data_pfn = 0;
+	}
+
+	BUG_ON(count > PAGE_SIZE - ps->data_offset);
+
+	copy_count = min_t(size_t, count, PAGE_SIZE - ps->data_offset);
+	if (copy_count > obj->data_len)
+		copy_count = obj->data_len;
+
+	addr = kmap_atomic(ps->data_page);
+	memcpy(buf, addr + ps->data_offset, copy_count);
+	kunmap_atomic(addr);
+
+	obj->data_len -= copy_count;
+	ps->data_offset += copy_count;
+
+	if (!obj->data_len) {
+		pkram_free_page(page_address(ps->data_page));
+		ps->data_page = NULL;
+	}
+
+	return copy_count;
 }

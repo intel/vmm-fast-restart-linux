@@ -17,6 +17,10 @@ struct pkram_stream {
 	unsigned int entry_idx;		/* next entry in link */
 
 	unsigned long next_index;
+
+	/* byte data */
+	struct page *data_page;
+	unsigned int data_offset;
 };
 
 #define PKRAM_NAME_MAX		256	/* including nul */
