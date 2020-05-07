@@ -12,6 +12,11 @@ struct pkram_stream {
 	gfp_t gfp_mask;
 	struct pkram_node *node;
 	struct pkram_obj *obj;
+
+	struct pkram_link *link;		/* current link */
+	unsigned int entry_idx;		/* next entry in link */
+
+	unsigned long next_index;
 };
 
 #define PKRAM_NAME_MAX		256	/* including nul */
