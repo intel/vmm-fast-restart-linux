@@ -12,6 +12,7 @@ struct device;
 #define SYS_RESTART	SYS_DOWN
 #define SYS_HALT	0x0002	/* Notify of system halt */
 #define SYS_POWER_OFF	0x0003	/* Notify of system power off */
+#define SYS_LIVE_UPDATE	SYS_DOWN
 
 enum reboot_mode {
 	REBOOT_UNDEFINED = -1,
@@ -42,6 +43,9 @@ extern int reboot_force;
 
 extern int register_reboot_notifier(struct notifier_block *);
 extern int unregister_reboot_notifier(struct notifier_block *);
+
+extern int register_live_update_notifier(struct notifier_block *);
+extern int unregister_live_update_notifier(struct notifier_block *);
 
 extern int devm_register_reboot_notifier(struct device *, struct notifier_block *);
 

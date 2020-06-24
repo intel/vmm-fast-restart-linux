@@ -53,7 +53,7 @@ note_buf_t __percpu *crash_notes;
 
 /* Flag to indicate we are going to kexec a new kernel */
 bool kexec_in_progress = false;
-
+bool kexec_live_update = false;
 
 /* Location of the reserved area for the crash kernel */
 struct resource crashk_res = {
@@ -1120,6 +1120,19 @@ static int __init crash_notes_memory_init(void)
 }
 subsys_initcall(crash_notes_memory_init);
 
+BLOCKING_NOTIFIER_HEAD(live_update_notifier_list);
+
+int register_live_update_notifier(struct notifier_block *nb)
+{
+	return blocking_notifier_chain_register(&live_update_notifier_list, nb);
+}
+EXPORT_SYMBOL(register_live_update_notifier);
+
+int unregister_live_update_notifier(struct notifier_block *nb)
+{
+	return blocking_notifier_chain_unregister(&live_update_notifier_list, nb);
+}
+EXPORT_SYMBOL(unregister_live_update_notifier);
 
 /*
  * Move into place and start executing a preloaded standalone
@@ -1170,6 +1183,9 @@ int kernel_kexec(void)
 #endif
 	{
 		kexec_in_progress = true;
+		if (kexec_live_update)
+			blocking_notifier_call_chain(&live_update_notifier_list,
+						     SYS_LIVE_UPDATE, NULL);
 		kernel_restart_prepare(NULL);
 		migrate_to_reboot_cpu();
 

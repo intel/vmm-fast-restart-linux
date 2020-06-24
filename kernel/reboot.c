@@ -378,8 +378,20 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
 
 #ifdef CONFIG_KEXEC_CORE
 	case LINUX_REBOOT_CMD_KEXEC:
+	{
+		int live_update;
+
+		if (arg) {
+			if (copy_from_user(&live_update, arg, sizeof(int))) {
+				ret = -EFAULT;
+				break;
+			}
+			kexec_live_update = !!live_update;
+		}
 		ret = kernel_kexec();
 		break;
+	}
+
 #endif
 
 #ifdef CONFIG_HIBERNATION
