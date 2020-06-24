@@ -343,6 +343,7 @@ extern note_buf_t __percpu *crash_notes;
 
 /* flag to track if kexec reboot is in progress */
 extern bool kexec_in_progress;
+extern bool kexec_live_update;
 
 int crash_shrink_memory(unsigned long new_size);
 size_t crash_get_memory_size(void);
