@@ -1080,14 +1080,14 @@ static int vfio_pci_set_keepalive(void *device_data,
 		if (ret)
 			goto token_free;
 
-		dev_set_keepalive(&vdev->pdev->dev);
+		pci_dev_set_keepalive(vdev->pdev);
 	} else if (!keepalive && dev_is_keepalive(&vdev->pdev->dev)) {
 		ret = vfio_pci_restore_keepalive_irq(vdev);
 		if (ret)
 			goto keepalive_out;
 		vfio_pci_free_keepalive_token(vdev);
 		vfio_pci_device_put(vdev);
-		dev_clear_keepalive(&vdev->pdev->dev);
+		pci_dev_clear_keepalive(vdev->pdev);
 		vfio_pci_replay_error(vdev);
 	}
 
