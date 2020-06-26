@@ -54,7 +54,8 @@ struct pkram_link {
 struct pkram_obj {
 	__u64	data_pfn;	/* points to the byte data */
 	__u64	data_len;	/* byte data size */
-	__u64	link_pfn;	/* points to the first link of the object */
+	__u64	link_pfn_first;	/* points to the first link of the object */
+	__u64	link_pfn_last;	/* points to the last link of the object */
 	__u64	obj_pfn;	/* points to the next object in the list */
 };
 
@@ -486,7 +487,7 @@ static void pkram_truncate_obj(struct pkram_obj *obj)
 	unsigned long link_pfn;
 	struct pkram_link *link;
 
-	link_pfn = obj->link_pfn;
+	link_pfn = obj->link_pfn_first;
 	while (link_pfn) {
 		link = pfn_to_kaddr(link_pfn);
 		pkram_truncate_link(link);
@@ -494,7 +495,8 @@ static void pkram_truncate_obj(struct pkram_obj *obj)
 		pkram_free_page(link);
 		cond_resched();
 	}
-	obj->link_pfn = 0;
+	obj->link_pfn_first = 0;
+	obj->link_pfn_last = 0;
 }
 
 static void pkram_truncate_node(struct pkram_node *node)
@@ -541,19 +543,27 @@ static void pkram_truncate(void)
 
 static void pkram_add_link(struct pkram_link *link, struct pkram_obj *obj)
 {
-	link->link_pfn = obj->link_pfn;
-	obj->link_pfn = page_to_pfn(virt_to_page(link));
+	if (obj->link_pfn_last) {
+		struct pkram_link *last = pfn_to_kaddr(obj->link_pfn_last);
+
+		last->link_pfn = page_to_pfn(virt_to_page(link));
+	}
+	obj->link_pfn_last = page_to_pfn(virt_to_page(link));
+	if (!obj->link_pfn_first)
+		obj->link_pfn_first = obj->link_pfn_last;
 }
 
 static struct pkram_link *pkram_remove_link(struct pkram_obj *obj)
 {
 	struct pkram_link *current_link;
 
-	if (!obj->link_pfn)
+	if (!obj->link_pfn_first)
 		return NULL;
 
-	current_link = pfn_to_kaddr(obj->link_pfn);
-	obj->link_pfn = current_link->link_pfn;
+	current_link = pfn_to_kaddr(obj->link_pfn_first);
+	obj->link_pfn_first = current_link->link_pfn;
+	if (!obj->link_pfn_first)
+		obj->link_pfn_last = 0;
 	current_link->link_pfn = 0;
 
 	return current_link;
