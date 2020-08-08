@@ -276,6 +276,18 @@ int  __attribute__((weak)) kvm_arch_update_irqfd_routing(
 {
 	return 0;
 }
+
+int __attribute__((weak)) kvm_arch_irq_bypass_save_consumer(struct irq_bypass_consumer *cons,
+				      void **data)
+{
+	return -ENOTSUPP;
+}
+
+int __attribute__((weak)) kvm_arch_irq_bypass_restore_consumer(struct irq_bypass_consumer *cons,
+				      void **data)
+{
+	return -ENOTSUPP;
+}
 #endif
 
 static int
@@ -408,6 +420,8 @@ kvm_irqfd_assign(struct kvm *kvm, struct kvm_irqfd *args)
 		irqfd->consumer.token = (void *)irqfd->eventfd;
 		irqfd->consumer.add_producer = kvm_arch_irq_bypass_add_producer;
 		irqfd->consumer.del_producer = kvm_arch_irq_bypass_del_producer;
+		irqfd->consumer.save_consumer = kvm_arch_irq_bypass_save_consumer;
+		irqfd->consumer.restore_consumer = kvm_arch_irq_bypass_restore_consumer;
 		irqfd->consumer.stop = kvm_arch_irq_bypass_stop;
 		irqfd->consumer.start = kvm_arch_irq_bypass_start;
 		ret = irq_bypass_register_consumer(&irqfd->consumer);

@@ -11091,6 +11091,30 @@ void kvm_arch_irq_bypass_del_producer(struct irq_bypass_consumer *cons,
 	kvm_arch_end_assignment(irqfd->kvm);
 }
 
+int kvm_arch_irq_bypass_save_consumer(struct irq_bypass_consumer *cons,
+				      void **data)
+{
+	struct kvm_kernel_irqfd *irqfd =
+		container_of(cons, struct kvm_kernel_irqfd, consumer);
+
+	if (!kvm_x86_ops.pi_do_keepalive)
+		return -ENOTSUPP;
+
+	return kvm_x86_ops.pi_do_keepalive(irqfd->kvm, irqfd->gsi, data, true);
+}
+
+int kvm_arch_irq_bypass_restore_consumer(struct irq_bypass_consumer *cons,
+					 void **data)
+{
+	struct kvm_kernel_irqfd *irqfd =
+		container_of(cons, struct kvm_kernel_irqfd, consumer);
+
+	if (!kvm_x86_ops.pi_do_keepalive)
+		return -ENOTSUPP;
+
+	return kvm_x86_ops.pi_do_keepalive(irqfd->kvm, irqfd->gsi, data, false);
+}
+
 int kvm_arch_update_irqfd_routing(struct kvm *kvm, unsigned int host_irq,
 				   uint32_t guest_irq, bool set)
 {

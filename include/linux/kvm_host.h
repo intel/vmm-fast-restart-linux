@@ -1410,6 +1410,8 @@ int kvm_arch_irq_bypass_add_producer(struct irq_bypass_consumer *,
 			   struct irq_bypass_producer *);
 void kvm_arch_irq_bypass_del_producer(struct irq_bypass_consumer *,
 			   struct irq_bypass_producer *);
+int kvm_arch_irq_bypass_save_consumer(struct irq_bypass_consumer *, void **);
+int kvm_arch_irq_bypass_restore_consumer(struct irq_bypass_consumer *, void **);
 void kvm_arch_irq_bypass_stop(struct irq_bypass_consumer *);
 void kvm_arch_irq_bypass_start(struct irq_bypass_consumer *);
 int kvm_arch_update_irqfd_routing(struct kvm *kvm, unsigned int host_irq,
