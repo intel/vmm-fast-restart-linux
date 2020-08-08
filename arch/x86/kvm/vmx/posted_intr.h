@@ -96,4 +96,8 @@ bool pi_has_pending_interrupt(struct kvm_vcpu *vcpu);
 int pi_update_irte(struct kvm *kvm, unsigned int host_irq, uint32_t guest_irq,
 		   bool set);
 
+void vmx_init_pi_desc(struct kvm *kvm);
+int vmx_vcpu_alloc_pi_desc(struct kvm_vcpu *vcpu);
+void vmx_vcpu_free_pi_desc(struct kvm_vcpu *vcpu);
+
 #endif /* __KVM_X86_VMX_POSTED_INTR_H */
