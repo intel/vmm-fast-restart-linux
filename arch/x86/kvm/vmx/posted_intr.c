@@ -330,3 +330,123 @@ out:
 	srcu_read_unlock(&kvm->irq_srcu, idx);
 	return ret;
 }
+
+#define PAGE_PI_DESC_BITS	(PAGE_SIZE/sizeof(struct pi_desc))
+
+static void pid_page_prepare(struct page *page)
+{
+	/* we can use the 5-word fields in struct page */
+	INIT_LIST_HEAD(&page->lru);
+	page->mapping = NULL;
+	page->index = 0;
+	page->private = 0;
+}
+
+/* use page->mapping as the pi_desc bitmap */
+static unsigned long *page_pi_desc_bitmap(struct page *page)
+{
+	return (unsigned long *)&page->mapping;
+}
+
+static int pid_page_find_zero_bit(struct page *page)
+{
+	unsigned long *pi_desc_bitmap = page_pi_desc_bitmap(page);
+
+	return find_first_zero_bit(pi_desc_bitmap, PAGE_PI_DESC_BITS);
+}
+
+static bool pid_page_empty(struct page *page)
+{
+	unsigned long *pi_desc_bitmap = page_pi_desc_bitmap(page);
+	int num;
+
+	num = find_first_bit(pi_desc_bitmap, PAGE_PI_DESC_BITS);
+	return num >= PAGE_PI_DESC_BITS;
+}
+
+static void pid_page_set_bit(struct page *page, int num)
+{
+	unsigned long *pi_desc_bitmap = page_pi_desc_bitmap(page);
+
+	set_bit(num, pi_desc_bitmap);
+}
+
+static void pid_page_clear_bit(struct page *page, int num)
+{
+	unsigned long *pi_desc_bitmap = page_pi_desc_bitmap(page);
+
+	clear_bit(num, pi_desc_bitmap);
+}
+
+static bool pid_page_lru_linked(struct page *page)
+{
+	return !list_empty(&page->lru);
+}
+
+void vmx_init_pi_desc(struct kvm *kvm)
+{
+	struct kvm_vmx *kv = to_kvm_vmx(kvm);
+
+	mutex_init(&kv->pid_page_lock);
+	INIT_LIST_HEAD(&kv->pid_page_list);
+}
+
+int vmx_vcpu_alloc_pi_desc(struct kvm_vcpu *vcpu)
+{
+	struct kvm_vmx *kv = to_kvm_vmx(vcpu->kvm);
+	struct vcpu_vmx *vmx = to_vmx(vcpu);
+	struct page *page;
+	int num;
+
+	mutex_lock(&kv->pid_page_lock);
+
+	list_for_each_entry(page, &kv->pid_page_list, lru) {
+		num = pid_page_find_zero_bit(page);
+		if (num < PAGE_PI_DESC_BITS) {
+			get_page(page);
+			goto found_pid;
+		}
+	}
+
+	page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+	if (!page) {
+		mutex_unlock(&kv->pid_page_lock);
+		return -ENOMEM;
+	}
+	pid_page_prepare(page);
+	list_add(&page->lru, &kv->pid_page_list);
+	num = 0;
+found_pid:
+	pid_page_set_bit(page, num);
+	vmx->pi_desc = page_to_virt(page) + num * sizeof(struct pi_desc);
+	mutex_unlock(&kv->pid_page_lock);
+	return 0;
+}
+
+static void __vmx_vcpu_free_pi_desc(struct vcpu_vmx *vmx)
+{
+	struct page *page;
+	int num;
+
+	page = virt_to_page((unsigned long)vmx->pi_desc & PAGE_MASK);
+	num = ((unsigned long)vmx->pi_desc & ~PAGE_MASK) / sizeof(struct pi_desc);
+
+	pid_page_clear_bit(page, num);
+	if (pid_page_empty(page)) {
+		list_del(&page->lru);
+		INIT_LIST_HEAD(&page->lru);
+	}
+	put_page(page);
+}
+
+void vmx_vcpu_free_pi_desc(struct kvm_vcpu *vcpu)
+{
+	struct kvm_vmx *kv = to_kvm_vmx(vcpu->kvm);
+	struct vcpu_vmx *vmx = to_vmx(vcpu);
+
+	mutex_lock(&kv->pid_page_lock);
+
+	__vmx_vcpu_free_pi_desc(vmx);
+
+	mutex_unlock(&kv->pid_page_lock);
+}
