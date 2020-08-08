@@ -1280,6 +1280,8 @@ struct kvm_x86_ops {
 
 	void (*migrate_timers)(struct kvm_vcpu *vcpu);
 	void (*msr_filter_changed)(struct kvm_vcpu *vcpu);
+
+	int (*pi_do_keepalive)(struct kvm *kvm, int guest_irq, void **data, bool save);
 };
 
 struct kvm_x86_nested_ops {
