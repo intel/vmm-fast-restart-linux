@@ -285,6 +285,55 @@ static int vfio_msi_enable(struct vfio_pci_device *vdev, int nvec, bool msix)
 	return 0;
 }
 
+int vfio_pci_save_keepalive_irq(struct vfio_pci_device *vdev)
+{
+	int i, ret;
+
+	vdev->saved_irq_data = kzalloc(vdev->num_ctx * sizeof(void *), GFP_KERNEL);
+	if (vdev->saved_irq_data == NULL)
+		return -ENOMEM;
+	vdev->saved_num_ctx = vdev->num_ctx;
+
+	for (i = 0; i < vdev->num_ctx; i++) {
+		ret = irq_bypass_save_consumer(&vdev->ctx[i].producer,
+					       &vdev->saved_irq_data[i]);
+		if (ret)
+			goto out;
+	}
+	return 0;
+out:
+	while (--i >= 0) {
+		irq_bypass_restore_consumer(&vdev->ctx[i].producer,
+					    &vdev->saved_irq_data[i]);
+	}
+	return ret;
+}
+
+int vfio_pci_restore_keepalive_irq(struct vfio_pci_device *vdev)
+{
+	int i, ret;
+
+	if (vdev->num_ctx != vdev->saved_num_ctx)
+		return -EINVAL;
+
+	for (i = 0; i < vdev->num_ctx; i++) {
+		ret = irq_bypass_restore_consumer(&vdev->ctx[i].producer,
+						  &vdev->saved_irq_data[i]);
+		if (ret)
+			goto out;
+	}
+	kfree(vdev->saved_irq_data);
+	vdev->saved_irq_data = NULL;
+	vdev->saved_num_ctx = 0;
+	return 0;
+out:
+	while (--i >= 0) {
+		irq_bypass_save_consumer(&vdev->ctx[i].producer,
+					 &vdev->saved_irq_data[i]);
+	}
+	return ret;
+}
+
 static int vfio_msi_set_vector_signal(struct vfio_pci_device *vdev,
 				      int vector, int fd, bool msix)
 {
