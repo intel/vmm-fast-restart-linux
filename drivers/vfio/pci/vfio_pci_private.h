@@ -110,6 +110,8 @@ struct vfio_pci_device {
 	struct mutex		igate;
 	struct vfio_pci_irq_ctx	*ctx;
 	int			num_ctx;
+	int			saved_num_ctx;
+	void			**saved_irq_data;
 	int			irq_type;
 	int			num_regions;
 	struct vfio_pci_region	*region;
@@ -154,6 +156,9 @@ struct vfio_pci_device {
 
 extern void vfio_pci_intx_mask(struct vfio_pci_device *vdev);
 extern void vfio_pci_intx_unmask(struct vfio_pci_device *vdev);
+
+extern int vfio_pci_save_keepalive_irq(struct vfio_pci_device *vdev);
+extern int vfio_pci_restore_keepalive_irq(struct vfio_pci_device *vdev);
 
 extern int vfio_pci_set_irqs_ioctl(struct vfio_pci_device *vdev,
 				   uint32_t flags, unsigned index,
