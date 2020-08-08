@@ -268,3 +268,65 @@ void irq_bypass_unregister_consumer(struct irq_bypass_consumer *consumer)
 	module_put(THIS_MODULE);
 }
 EXPORT_SYMBOL_GPL(irq_bypass_unregister_consumer);
+
+int irq_bypass_save_consumer(struct irq_bypass_producer *producer,
+			     void **consumer_data)
+{
+	struct irq_bypass_consumer *consumer;
+	int ret;
+
+	if (!producer->token)
+		return -EINVAL;
+
+	might_sleep();
+
+	mutex_lock(&lock);
+
+	list_for_each_entry(consumer, &consumers, node) {
+		if (consumer->token == producer->token) {
+			if (!consumer->save_consumer) {
+				mutex_unlock(&lock);
+				return -ENOTSUPP;
+			}
+			ret = consumer->save_consumer(consumer, consumer_data);
+			mutex_unlock(&lock);
+			return ret;
+		}
+	}
+
+	mutex_unlock(&lock);
+
+	return -EINVAL;
+}
+EXPORT_SYMBOL_GPL(irq_bypass_save_consumer);
+
+int irq_bypass_restore_consumer(struct irq_bypass_producer *producer,
+				void **consumer_data)
+{
+	struct irq_bypass_consumer *consumer;
+	int ret;
+
+	if (!producer->token)
+		return -EINVAL;
+
+	might_sleep();
+
+	mutex_lock(&lock);
+
+	list_for_each_entry(consumer, &consumers, node) {
+		if (consumer->token == producer->token) {
+			if (!consumer->restore_consumer) {
+				mutex_unlock(&lock);
+				return -ENOTSUPP;
+			}
+			ret = consumer->restore_consumer(consumer, consumer_data);
+			mutex_unlock(&lock);
+			return ret;
+		}
+	}
+
+	mutex_unlock(&lock);
+
+	return -EINVAL;
+}
+EXPORT_SYMBOL_GPL(irq_bypass_restore_consumer);

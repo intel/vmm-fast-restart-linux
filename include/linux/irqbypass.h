@@ -75,6 +75,8 @@ struct irq_bypass_consumer {
 			    struct irq_bypass_producer *);
 	void (*del_producer)(struct irq_bypass_consumer *,
 			     struct irq_bypass_producer *);
+	int (*save_consumer)(struct irq_bypass_consumer *, void **);
+	int (*restore_consumer)(struct irq_bypass_consumer *, void **);
 	void (*stop)(struct irq_bypass_consumer *);
 	void (*start)(struct irq_bypass_consumer *);
 };
@@ -83,5 +85,7 @@ int irq_bypass_register_producer(struct irq_bypass_producer *);
 void irq_bypass_unregister_producer(struct irq_bypass_producer *);
 int irq_bypass_register_consumer(struct irq_bypass_consumer *);
 void irq_bypass_unregister_consumer(struct irq_bypass_consumer *);
+int irq_bypass_save_consumer(struct irq_bypass_producer *, void **);
+int irq_bypass_restore_consumer(struct irq_bypass_producer *, void **);
 
 #endif /* IRQBYPASS_H */
