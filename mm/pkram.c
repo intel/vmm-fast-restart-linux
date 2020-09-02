@@ -636,6 +636,7 @@ int pkram_prepare_save(struct pkram_stream *ps, const char *name, gfp_t gfp_mask
 	pkram_stream_init(ps, node, gfp_mask);
 	return 0;
 }
+EXPORT_SYMBOL(pkram_prepare_save);
 
 /**
  * Create a preserved memory object and initialize stream @ps for saving data
@@ -675,6 +676,7 @@ int pkram_prepare_save_obj(struct pkram_stream *ps)
 	pkram_stream_init_obj(ps, obj);
 	return 0;
 }
+EXPORT_SYMBOL(pkram_prepare_save_obj);
 
 /**
  * Commit the object started with pkram_prepare_save_obj() to preserved memory.
@@ -690,6 +692,7 @@ void pkram_finish_save_obj(struct pkram_stream *ps)
 
 	BUG_ON((node->flags & PKRAM_ACCMODE_MASK) != PKRAM_SAVE);
 }
+EXPORT_SYMBOL(pkram_finish_save_obj);
 
 /**
  * Commit the save to preserved memory started with pkram_prepare_save().
@@ -706,6 +709,7 @@ void pkram_finish_save(struct pkram_stream *ps)
 	smp_wmb();
 	node->flags &= ~PKRAM_ACCMODE_MASK;
 }
+EXPORT_SYMBOL(pkram_finish_save);
 
 /**
  * Cancel the save to preserved memory started with pkram_prepare_save() and
@@ -730,6 +734,7 @@ void pkram_discard_save(struct pkram_stream *ps)
 	pkram_truncate_node(node);
 	pkram_free_page(node);
 }
+EXPORT_SYMBOL(pkram_discard_save);
 
 /**
  * Remove the preserved memory node with name @name and initialize stream @ps
@@ -772,6 +777,7 @@ out_unlock:
 	pkram_stream_init(ps, node, 0);
 	return 0;
 }
+EXPORT_SYMBOL(pkram_prepare_load);
 
 /**
  * Remove the next preserved memory object from the stream @ps and
@@ -802,6 +808,7 @@ int pkram_prepare_load_obj(struct pkram_stream *ps)
 	pkram_stream_init_obj(ps, obj);
 	return 0;
 }
+EXPORT_SYMBOL(pkram_prepare_load_obj);
 
 /**
  * Finish the load of a preserved memory object started with
@@ -845,6 +852,7 @@ void pkram_finish_load_obj(struct pkram_stream *ps)
 	pkram_truncate_obj(obj);
 	pkram_free_page(obj);
 }
+EXPORT_SYMBOL(pkram_finish_load_obj);
 
 /**
  * Finish the load from preserved memory started with pkram_prepare_load()
@@ -865,6 +873,7 @@ void pkram_finish_load(struct pkram_stream *ps)
 	pkram_truncate_node(node);
 	pkram_free_page(node);
 }
+EXPORT_SYMBOL(pkram_finish_load);
 
 /*
  * Insert page to PKRAM node allocating a new PKRAM link if necessary.
@@ -974,6 +983,7 @@ int pkram_save_page(struct pkram_stream *ps, struct page *page, short flags)
 
 	return err;
 }
+EXPORT_SYMBOL(pkram_save_page);
 
 /*
  * Extract the next page from preserved memory freeing a PKRAM link if it
@@ -1067,6 +1077,7 @@ struct page *pkram_load_page(struct pkram_stream *ps, unsigned long *index, shor
 
 	return __pkram_load_page(ps, index, flags);
 }
+EXPORT_SYMBOL(pkram_load_page);
 
 /**
  * Copy @count bytes from @buf to the preserved memory node and object
@@ -1208,6 +1219,7 @@ int pkram_save_chunk(struct pkram_stream *ps, const void *buf, size_t size)
 
 	return 0;
 }
+EXPORT_SYMBOL(pkram_save_chunk);
 
 int pkram_load_chunk(struct pkram_stream *ps, void *buf, size_t size)
 {
@@ -1243,6 +1255,7 @@ int pkram_load_chunk(struct pkram_stream *ps, void *buf, size_t size)
 
 	return 0;
 }
+EXPORT_SYMBOL(pkram_load_chunk);
 
 /*
  * Build the list of PKRAM nodes.
