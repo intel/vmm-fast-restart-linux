@@ -1962,6 +1962,206 @@ static void vfio_iommu_iova_insert_copy(struct vfio_iommu *iommu,
 	list_splice_tail(iova_copy, iova);
 }
 
+struct keepalive_info {
+	bool initialized;
+	bool keepalive;
+};
+
+static int vfio_check_dev_keepalive(struct device *dev, void *data)
+{
+	struct keepalive_info *info = data;
+
+	if (info->initialized && info->keepalive != dev->keepalive)
+		return -EINVAL;
+
+	info->initialized = true;
+	info->keepalive = dev->keepalive;
+
+	return 0;
+}
+
+/*
+ * Try to restore the keepalive flag of the iommu.
+ *
+ * If all devices in the iommu_group are keepalive, the iommu that the
+ * iommu_group attached to should also be keepalive.
+ */
+static int iommu_try_restore_keepalive(struct vfio_iommu *iommu,
+				       struct iommu_group *iommu_group)
+{
+	struct keepalive_info info;
+
+	info.initialized = false;
+	if (iommu_group_for_each_dev(iommu_group, &info,
+				     vfio_check_dev_keepalive))
+		return -EINVAL;
+
+	if (info.keepalive) {
+		/* Shouldn't have existing non-keepalive domains */
+		if (!iommu->keepalive && !list_empty(&iommu->domain_list))
+			return -EINVAL;
+
+		iommu->keepalive = info.keepalive;
+	} else {
+		if (iommu->keepalive)
+			return -EINVAL;
+	}
+	return 0;
+}
+
+static int vfio_iommu_domain(struct device *dev, void *data)
+{
+	struct iommu_domain **domain = data, *dev_domain;
+
+	dev_domain = iommu_get_domain_for_dev(dev);
+	if (*domain && *domain != dev_domain)
+		return -EINVAL;
+
+	*domain = dev_domain;
+
+	return 0;
+}
+
+
+static int attach_keepalive_group(void *iommu_data,
+				  struct iommu_group *iommu_group)
+{
+	struct vfio_iommu *iommu = iommu_data;
+	struct vfio_group *group = NULL;
+	struct vfio_domain *domain = NULL, *d;
+	struct iommu_domain *iommu_domain = NULL;
+	struct bus_type *bus = NULL;
+	struct iommu_domain_geometry geo;
+	phys_addr_t resv_msi_base = 0;
+	bool resv_msi, msi_remap;
+	LIST_HEAD(group_resv_regions);
+	LIST_HEAD(iova_copy);
+	int ret;
+
+	ret = iommu_group_for_each_dev(iommu_group, &bus, vfio_bus_type);
+	if (ret)
+		return ret;
+
+	ret = iommu_group_for_each_dev(iommu_group, &iommu_domain, vfio_iommu_domain);
+	if (ret || iommu_domain == NULL)
+		return -EINVAL;
+
+	/* Get aperture info */
+	iommu_domain_get_attr(iommu_domain, DOMAIN_ATTR_GEOMETRY, &geo);
+
+	if (vfio_iommu_aper_conflict(iommu, geo.aperture_start,
+				     geo.aperture_end))
+		return -EINVAL;
+
+	ret = iommu_get_group_resv_regions(iommu_group, &group_resv_regions);
+	if (ret)
+		return ret;
+
+	if (vfio_iommu_resv_conflict(iommu, &group_resv_regions)) {
+		ret = -EINVAL;
+		goto out_free;
+	}
+
+	/*
+	 * We don't want to work on the original iova list as the list
+	 * gets modified and in case of failure we have to retain the
+	 * original list. Get a copy here.
+	 */
+	ret = vfio_iommu_iova_get_copy(iommu, &iova_copy);
+	if (ret)
+		goto out_free;
+
+	ret = vfio_iommu_aper_resize(&iova_copy, geo.aperture_start,
+				     geo.aperture_end);
+	if (ret)
+		goto out_free;
+
+	ret = vfio_iommu_resv_exclude(&iova_copy, &group_resv_regions);
+	if (ret)
+		goto out_free;
+
+	resv_msi = vfio_iommu_has_sw_msi(&group_resv_regions, &resv_msi_base);
+	vfio_iommu_resv_free(&group_resv_regions);
+
+	group = kzalloc(sizeof(*group), GFP_KERNEL);
+	if (!group) {
+		ret = -ENOMEM;
+		goto out_free;
+	}
+	group->iommu_group = iommu_group;
+
+	list_for_each_entry(d, &iommu->domain_list, next) {
+		if (d->domain == iommu_domain) {
+			domain = d;
+			goto domain_found;
+		}
+	}
+
+	domain = kzalloc(sizeof(*domain), GFP_KERNEL);
+	if (!domain) {
+		ret = -ENOMEM;
+		goto out_free;
+	}
+	INIT_LIST_HEAD(&domain->group_list);
+	domain->domain = iommu_domain;
+
+	if (iommu_capable(bus, IOMMU_CAP_CACHE_COHERENCY))
+		domain->prot |= IOMMU_CACHE;
+
+	msi_remap = irq_domain_check_msi_remap() ||
+		    iommu_capable(bus, IOMMU_CAP_INTR_REMAP);
+
+	if (!allow_unsafe_interrupts && !msi_remap) {
+		pr_warn("%s: No interrupt remapping support.  Use the module param \"allow_unsafe_interrupts\" to enable VFIO IOMMU support on this platform\n",
+		       __func__);
+		ret = -EPERM;
+		goto out_free;
+	}
+
+	/*
+	 * We change our unmap behavior slightly depending on whether the IOMMU
+	 * supports fine-grained superpages.  IOMMUs like AMD-Vi will use a
+	 * superpage for practically any contiguous power-of-two mapping we give
+	 * it.  This means we don't need to look for contiguous chunks ourselves
+	 * to make unmapping more efficient.  On IOMMUs with coarse-grained super
+	 * pages, like Intel VT-d with discrete 2M/1G/512G/1T superpages,
+	 * identifying contiguous chunks significantly boosts non-hugetlbfs
+	 * mappings and doesn't seem to hurt when hugetlbfs is in use.
+	 */
+	domain->fgsp = iommu_capable(bus, IOMMU_CAP_FGSP);
+
+	if (resv_msi) {
+		ret = iommu_get_msi_cookie(domain->domain, resv_msi_base);
+		if (ret && ret != -ENODEV)
+			goto out_free;
+	}
+
+	list_add(&domain->next, &iommu->domain_list);
+	vfio_update_pgsize_bitmap(iommu);
+domain_found:
+	list_add(&group->next, &domain->group_list);
+
+	/* Delete the old one and insert new iova list */
+	vfio_iommu_iova_insert_copy(iommu, &iova_copy);
+
+	/*
+	 * An iommu backed group can dirty memory directly and therefore
+	 * demotes the iommu scope until it declares itself dirty tracking
+	 * capable via the page pinning interface.
+	 */
+	iommu->pinned_page_dirty_scope = false;
+	mutex_unlock(&iommu->lock);
+
+	return 0;
+out_free:
+	vfio_iommu_iova_free(&iova_copy);
+	vfio_iommu_resv_free(&group_resv_regions);
+	kfree(domain);
+	kfree(group);
+	mutex_unlock(&iommu->lock);
+	return ret;
+}
+
 static int vfio_iommu_type1_attach_group(void *iommu_data,
 					 struct iommu_group *iommu_group)
 {
@@ -1982,6 +2182,18 @@ static int vfio_iommu_type1_attach_group(void *iommu_data,
 	if (vfio_iommu_find_iommu_group(iommu, iommu_group)) {
 		mutex_unlock(&iommu->lock);
 		return -EINVAL;
+	}
+
+	ret = iommu_try_restore_keepalive(iommu, iommu_group);
+	if (ret) {
+		mutex_unlock(&iommu->lock);
+		return -EINVAL;
+	}
+
+	if (iommu->keepalive) {
+		ret = attach_keepalive_group(iommu, iommu_group);
+		mutex_unlock(&iommu->lock);
+		return ret;
 	}
 
 	group = kzalloc(sizeof(*group), GFP_KERNEL);
@@ -2356,7 +2568,9 @@ static void vfio_iommu_type1_detach_group(void *iommu_data,
 		if (!group)
 			continue;
 
-		vfio_iommu_detach_group(domain, group);
+		if (!iommu->keepalive)
+			vfio_iommu_detach_group(domain, group);
+
 		update_dirty_scope = !group->pinned_page_dirty_scope;
 		list_del(&group->next);
 		kfree(group);
@@ -2374,7 +2588,8 @@ static void vfio_iommu_type1_detach_group(void *iommu_data,
 				else
 					vfio_iommu_unmap_unpin_reaccount(iommu);
 			}
-			iommu_domain_free(domain->domain);
+			if (!iommu->keepalive)
+				iommu_domain_free(domain->domain);
 			list_del(&domain->next);
 			kfree(domain);
 			vfio_iommu_aper_expand(iommu, &iova_copy);
