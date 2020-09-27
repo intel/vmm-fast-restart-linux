@@ -324,6 +324,7 @@ struct keepalive_state {
 	bool virq_disabled;
 	bool reset_works;
 	bool bardirty;
+	uuid_t uuid;
 	struct pci_saved_state *pci_saved_state;
 	struct pci_saved_state *pm_save;
 };
@@ -359,6 +360,27 @@ static void add_keepalive_state(struct keepalive_state *state)
 	mutex_unlock(&keepalive_state_lock);
 }
 
+static bool vfio_pci_match_keepalive_token(struct vfio_pci_device *vdev, uuid_t *uuid)
+{
+	struct keepalive_state *state;
+	int bus, devfn;
+	bool match;
+
+	bus = vdev->pdev->bus->number;
+	devfn = vdev->pdev->devfn;
+
+	mutex_lock(&keepalive_state_lock);
+	list_for_each_entry(state, &keepalive_state_list, list) {
+		if (state->bus == bus && state->devfn == devfn) {
+			match = uuid_equal(uuid, (uuid_t *)&state->uuid);
+			mutex_unlock(&keepalive_state_lock);
+			return match;
+		}
+	}
+	mutex_unlock(&keepalive_state_lock);
+	return false;
+}
+
 static int restore_keepalive_state(struct vfio_pci_device *vdev)
 {
 	struct keepalive_state *state;
@@ -368,6 +390,16 @@ static int restore_keepalive_state(struct vfio_pci_device *vdev)
 				     vdev->pdev->devfn);
 	if (!state)
 		return -ENOENT;
+
+	if (!vdev->keepalive_token) {
+		vdev->keepalive_token = kzalloc(sizeof(uuid_t), GFP_KERNEL);
+		if (!vdev->keepalive_token) {
+			add_keepalive_state(state);
+			return -ENOMEM;
+		}
+	}
+
+	uuid_copy(vdev->keepalive_token, &state->uuid);
 
 	kfree(vdev->vconfig);
 	vdev->vconfig = state->vconfig;
@@ -516,6 +548,13 @@ static int save_keepalive_state(struct vfio_pci_device *vdev)
 
 	state->bus = vdev->pdev->bus->number;
 	state->devfn = vdev->pdev->devfn;
+
+	if (vdev->keepalive_token) {
+		uuid_copy(&state->uuid, vdev->keepalive_token);
+	} else {
+		pci_warn(vdev->pdev, "keepalive token not specified, generate a random one\n");
+		uuid_gen(&state->uuid);
+	}
 
 	state->vconfig = vdev->vconfig;
 	vdev->vconfig = NULL;
@@ -919,6 +958,25 @@ int vfio_pci_register_dev_region(struct vfio_pci_device *vdev,
 	return 0;
 }
 
+static void vfio_pci_free_keepalive_token(struct vfio_pci_device *vdev)
+{
+	kfree(vdev->keepalive_token);
+	vdev->keepalive_token= NULL;
+}
+
+static int vfio_pci_alloc_keepalive_token(struct vfio_pci_device *vdev,
+					  guid_t *guid)
+{
+	uuid_t *token;
+
+	token = kzalloc(sizeof(*token), GFP_KERNEL);
+	if (!token)
+		return -ENOMEM;
+	uuid_copy(token, (uuid_t *)guid);
+	vdev->keepalive_token = token;
+	return 0;
+}
+
 static int vfio_pci_device_get(struct vfio_pci_device *vdev)
 {
 	struct vfio_device *device;
@@ -973,14 +1031,21 @@ static int vfio_pci_set_keepalive(void *device_data,
 		if (ret)
 			goto keepalive_out;
 
+		ret = vfio_pci_alloc_keepalive_token(vdev, &vka->token);
+		if (ret)
+			goto device_put;
+
 		dev_set_keepalive(&vdev->pdev->dev);
 	} else if (!keepalive && dev_is_keepalive(&vdev->pdev->dev)) {
+		vfio_pci_free_keepalive_token(vdev);
 		vfio_pci_device_put(vdev);
 		dev_clear_keepalive(&vdev->pdev->dev);
 	}
 
 	mutex_unlock(&vdev->reflck->lock);
 	return 0;
+device_put:
+	vfio_pci_device_put(vdev);
 keepalive_out:
 	mutex_unlock(&vdev->reflck->lock);
 	return ret;
@@ -2031,13 +2096,49 @@ static int vfio_pci_validate_vf_token(struct vfio_pci_device *vdev,
 	return 0;
 }
 
+static int vfio_pci_validate_ka_token(struct vfio_pci_device *vdev,
+				      bool ka_token, uuid_t *uuid)
+{
+	int ret;
+
+	mutex_lock(&vdev->reflck->lock);
+
+	if (!dev_is_keepalive(&vdev->pdev->dev)) {
+		if (vdev->keepalive_token || ka_token) {
+			ret = -EINVAL;
+			goto validate_out;
+		}
+		mutex_unlock(&vdev->reflck->lock);
+		return 0;
+	}
+
+	if (!ka_token) {
+		pci_info_ratelimited(vdev->pdev,
+			"Keepalive token required to access device\n");
+		ret = -EACCES;
+		goto validate_out;
+	}
+
+	if (!vfio_pci_match_keepalive_token(vdev, uuid)) {
+		pci_info_ratelimited(vdev->pdev,
+			"Keepalive token not match\n");
+		ret = -EACCES;
+		goto validate_out;
+	}
+	ret = 0;
+validate_out:
+	mutex_unlock(&vdev->reflck->lock);
+	return ret;
+}
+
 #define VF_TOKEN_ARG "vf_token="
+#define KEEPALIVE_TOKEN_ARG "keepalive_token="
 
 static int vfio_pci_match(void *device_data, char *buf)
 {
 	struct vfio_pci_device *vdev = device_data;
-	bool vf_token = false;
-	uuid_t uuid;
+	bool vf_token = false, ka_token = false;
+	uuid_t uuid, ka_uuid;
 	int ret;
 
 	if (strncmp(pci_name(vdev->pdev), buf, strlen(pci_name(vdev->pdev))))
@@ -2068,14 +2169,35 @@ static int vfio_pci_match(void *device_data, char *buf)
 
 				vf_token = true;
 				buf += UUID_STRING_LEN;
+			} else if (!ka_token &&
+				   !strncmp(buf, KEEPALIVE_TOKEN_ARG,
+					    strlen(KEEPALIVE_TOKEN_ARG))) {
+				buf += strlen(KEEPALIVE_TOKEN_ARG);
+
+				if (strlen(buf) < UUID_STRING_LEN)
+					return -EINVAL;
+
+				ret = uuid_parse(buf, &ka_uuid);
+				if (ret)
+					return ret;
+
+				ka_token = true;
+				buf += UUID_STRING_LEN;
 			} else {
 				/* Unknown/duplicate option */
 				return -EINVAL;
 			}
+
+			if (*buf && *buf != ' ')
+				return -EINVAL;
 		}
 	}
 
 	ret = vfio_pci_validate_vf_token(vdev, vf_token, &uuid);
+	if (ret)
+		return ret;
+
+	ret = vfio_pci_validate_ka_token(vdev, ka_token, &ka_uuid);
 	if (ret)
 		return ret;
 
