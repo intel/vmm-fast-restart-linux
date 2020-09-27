@@ -314,12 +314,89 @@ int vfio_pci_set_power_state(struct vfio_pci_device *vdev, pci_power_t state)
 	return ret;
 }
 
+struct keepalive_state {
+	struct list_head list;
+	u8 bus;
+	u8 devfn;
+	u8 *vconfig;
+	u32 rbar[7];
+	bool pci_2_3;
+	bool virq_disabled;
+	bool reset_works;
+	bool bardirty;
+	struct pci_saved_state *pci_saved_state;
+	struct pci_saved_state *pm_save;
+};
+
+static LIST_HEAD(keepalive_state_list);
+static DEFINE_MUTEX(keepalive_state_lock);
+
+static struct keepalive_state *find_keepalive_state(int bus, int devfn)
+{
+	struct keepalive_state *state;
+
+	mutex_lock(&keepalive_state_lock);
+	list_for_each_entry(state, &keepalive_state_list, list) {
+		if (state->bus == bus && state->devfn == devfn) {
+			pr_debug("found detached vfio keepalive state: bus %d, devfn %04x\n",
+				 bus, devfn);
+			list_del(&state->list);
+			mutex_unlock(&keepalive_state_lock);
+			return state;
+		}
+	}
+	mutex_unlock(&keepalive_state_lock);
+
+	pr_warn("no detached vfio pci device state: bus %d, devfn %04x\n",
+		bus, devfn);
+	return NULL;
+}
+
+static void add_keepalive_state(struct keepalive_state *state)
+{
+	mutex_lock(&keepalive_state_lock);
+	list_add(&state->list, &keepalive_state_list);
+	mutex_unlock(&keepalive_state_lock);
+}
+
+static int restore_keepalive_state(struct vfio_pci_device *vdev)
+{
+	struct keepalive_state *state;
+	int i;
+
+	state = find_keepalive_state(vdev->pdev->bus->number,
+				     vdev->pdev->devfn);
+	if (!state)
+		return -ENOENT;
+
+	kfree(vdev->vconfig);
+	vdev->vconfig = state->vconfig;
+	for (i = 0; i < 7; i++)
+		vdev->rbar[i] = state->rbar[i];
+	vdev->pci_2_3 = state->pci_2_3;
+	vdev->virq_disabled = state->virq_disabled;
+	vdev->reset_works = state->reset_works;
+	vdev->bardirty = state->bardirty;
+	vdev->pci_saved_state = state->pci_saved_state;
+	vdev->pm_save = state->pm_save;
+
+	kfree(state);
+
+	if (vfio_pci_nointx(vdev->pdev))
+		vdev->nointx = true;
+
+	return 0;
+}
+
 static int vfio_pci_enable(struct vfio_pci_device *vdev)
 {
 	struct pci_dev *pdev = vdev->pdev;
 	int ret;
 	u16 cmd;
 	u8 msix_pos;
+
+	if (dev_is_keepalive(&pdev->dev))
+		goto after_hardware_setup;
 
 	vfio_pci_set_power_state(vdev, PCI_D0);
 
@@ -358,6 +435,7 @@ static int vfio_pci_enable(struct vfio_pci_device *vdev)
 		pci_write_config_word(pdev, PCI_COMMAND, cmd);
 	}
 
+after_hardware_setup:
 	ret = vfio_config_init(vdev);
 	if (ret) {
 		kfree(vdev->pci_saved_state);
@@ -414,11 +492,47 @@ static int vfio_pci_enable(struct vfio_pci_device *vdev)
 
 	vfio_pci_probe_mmaps(vdev);
 
+	if (dev_is_keepalive(&pdev->dev)) {
+		ret = restore_keepalive_state(vdev);
+		if (ret)
+			goto disable_exit;
+	}
+
 	return 0;
 
 disable_exit:
 	vfio_pci_disable(vdev);
 	return ret;
+}
+
+static int save_keepalive_state(struct vfio_pci_device *vdev)
+{
+	struct keepalive_state *state;
+	int i;
+
+	state = kmalloc(sizeof(*state), GFP_KERNEL);
+	if (!state)
+		return -ENOMEM;
+
+	state->bus = vdev->pdev->bus->number;
+	state->devfn = vdev->pdev->devfn;
+
+	state->vconfig = vdev->vconfig;
+	vdev->vconfig = NULL;
+	for (i = 0; i < 7; i++)
+		state->rbar[i] = vdev->rbar[i];
+	state->pci_2_3 = vdev->pci_2_3;
+	state->virq_disabled = vdev->virq_disabled;
+	state->reset_works = vdev->reset_works;
+	state->bardirty = vdev->bardirty;
+	state->pci_saved_state = vdev->pci_saved_state;
+	vdev->pci_saved_state = NULL;
+	state->pm_save = vdev->pm_save;
+	vdev->pm_save = NULL;
+
+	add_keepalive_state(state);
+
+	return 0;
 }
 
 static void vfio_pci_disable(struct vfio_pci_device *vdev)
@@ -428,8 +542,13 @@ static void vfio_pci_disable(struct vfio_pci_device *vdev)
 	struct vfio_pci_ioeventfd *ioeventfd, *ioeventfd_tmp;
 	int i, bar;
 
-	/* Stop the device from further DMA */
-	pci_clear_master(pdev);
+	if (dev_is_keepalive(&vdev->pdev->dev)) {
+		if (save_keepalive_state(vdev))
+			pci_warn(vdev->pdev, "failed to save keepalive state\n");
+	} else {
+		/* Stop the device from further DMA */
+		pci_clear_master(pdev);
+	}
 
 	vfio_pci_set_irqs_ioctl(vdev, VFIO_IRQ_SET_DATA_NONE |
 				VFIO_IRQ_SET_ACTION_TRIGGER,
@@ -470,6 +589,10 @@ static void vfio_pci_disable(struct vfio_pci_device *vdev)
 		release_resource(&dummy_res->resource);
 		kfree(dummy_res);
 	}
+
+	/* don't touch hardware */
+	if (dev_is_keepalive(&vdev->pdev->dev))
+		return;
 
 	vdev->needs_reset = true;
 
