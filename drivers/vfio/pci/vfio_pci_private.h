@@ -142,6 +142,7 @@ struct vfio_pci_device {
 	struct mutex		vma_lock;
 	struct list_head	vma_list;
 	struct rw_semaphore	memory_lock;
+	int			keepalive_err_cnt;
 	uuid_t			*keepalive_token;
 };
 
