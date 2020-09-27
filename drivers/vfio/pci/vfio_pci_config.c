@@ -222,6 +222,9 @@ static int vfio_default_config_write(struct vfio_pci_device *vdev, int pos,
 		memcpy(vdev->vconfig + pos, &virt_val, count);
 	}
 
+	if (dev_is_keepalive(&vdev->pdev->dev))
+		return count;
+
 	/* Non-virtualzed and writable bits go to hardware */
 	if (write & ~virt) {
 		struct pci_dev *pdev = vdev->pdev;
@@ -1141,6 +1144,10 @@ static int vfio_msi_config_write(struct vfio_pci_device *vdev, int pos,
 
 		/* Write back to virt and to hardware */
 		*pflags = cpu_to_le16(flags);
+
+		if (dev_is_keepalive(&vdev->pdev->dev))
+			return count;
+
 		ret = pci_user_write_config_word(vdev->pdev,
 						 start + PCI_MSI_FLAGS,
 						 flags);

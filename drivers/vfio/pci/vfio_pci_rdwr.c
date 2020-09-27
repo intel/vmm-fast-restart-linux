@@ -276,8 +276,11 @@ ssize_t vfio_pci_bar_rw(struct vfio_pci_device *vdev, char __user *buf,
 		x_end = vdev->msix_offset + vdev->msix_size;
 	}
 
-	done = do_io_rw(vdev, res->flags & IORESOURCE_MEM, io, buf, pos,
-			count, x_start, x_end, iswrite);
+	if (dev_is_keepalive(&pdev->dev) && iswrite)
+		done = count;
+	else
+		done = do_io_rw(vdev, res->flags & IORESOURCE_MEM, io, buf, pos,
+				count, x_start, x_end, iswrite);
 
 	if (done >= 0)
 		*ppos += done;
@@ -344,7 +347,11 @@ ssize_t vfio_pci_vga_rw(struct vfio_pci_device *vdev, char __user *buf,
 	 * probing, so we don't currently worry about access in relation
 	 * to the memory enable bit in the command register.
 	 */
-	done = do_io_rw(vdev, false, iomem, buf, off, count, 0, 0, iswrite);
+	if (dev_is_keepalive(&vdev->pdev->dev) && iswrite)
+		done = count;
+	else
+		done = do_io_rw(vdev, false, iomem, buf, off, count,
+				0, 0, iswrite);
 
 	vga_put(vdev->pdev, rsrc);
 
