@@ -1168,6 +1168,17 @@ static long vfio_ioctl_set_iommu(struct vfio_container *container,
 	return ret;
 }
 
+static long vfio_ioctl_set_keepalive(struct vfio_container *container,
+				     unsigned long arg)
+{
+	struct vfio_keepalive_data vka;
+
+	if (copy_from_user(&vka, (void __user *)arg, sizeof(vka)))
+		return -EINVAL;
+
+	return 0;
+}
+
 static long vfio_fops_unl_ioctl(struct file *filep,
 				unsigned int cmd, unsigned long arg)
 {
@@ -1188,6 +1199,9 @@ static long vfio_fops_unl_ioctl(struct file *filep,
 		break;
 	case VFIO_SET_IOMMU:
 		ret = vfio_ioctl_set_iommu(container, arg);
+		break;
+	case VFIO_SET_KEEPALIVE:
+		ret = vfio_ioctl_set_keepalive(container, arg);
 		break;
 	default:
 		driver = container->iommu_driver;
