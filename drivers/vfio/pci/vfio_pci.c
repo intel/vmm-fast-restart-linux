@@ -325,6 +325,7 @@ struct keepalive_state {
 	bool reset_works;
 	bool bardirty;
 	uuid_t uuid;
+	int keepalive_err_cnt;
 	struct pci_saved_state *pci_saved_state;
 	struct pci_saved_state *pm_save;
 };
@@ -381,6 +382,26 @@ static bool vfio_pci_match_keepalive_token(struct vfio_pci_device *vdev, uuid_t 
 	return false;
 }
 
+static void vfio_pci_keepalive_inc_error(struct vfio_pci_device *vdev)
+{
+	struct keepalive_state *state;
+	int bus, devfn;
+
+	bus = vdev->pdev->bus->number;
+	devfn = vdev->pdev->devfn;
+
+	mutex_lock(&keepalive_state_lock);
+	list_for_each_entry(state, &keepalive_state_list, list) {
+		if (state->bus == bus && state->devfn == devfn) {
+			state->keepalive_err_cnt++;
+			mutex_unlock(&keepalive_state_lock);
+			return;
+		}
+	}
+	mutex_unlock(&keepalive_state_lock);
+	return;
+}
+
 static int restore_keepalive_state(struct vfio_pci_device *vdev)
 {
 	struct keepalive_state *state;
@@ -411,6 +432,7 @@ static int restore_keepalive_state(struct vfio_pci_device *vdev)
 	vdev->bardirty = state->bardirty;
 	vdev->pci_saved_state = state->pci_saved_state;
 	vdev->pm_save = state->pm_save;
+	vdev->keepalive_err_cnt = state->keepalive_err_cnt;
 
 	kfree(state);
 
@@ -565,6 +587,7 @@ static int save_keepalive_state(struct vfio_pci_device *vdev)
 	state->reset_works = vdev->reset_works;
 	state->bardirty = vdev->bardirty;
 	state->pci_saved_state = vdev->pci_saved_state;
+	state->keepalive_err_cnt = vdev->keepalive_err_cnt;
 	vdev->pci_saved_state = NULL;
 	state->pm_save = vdev->pm_save;
 	vdev->pm_save = NULL;
@@ -1000,6 +1023,14 @@ static void vfio_pci_device_put(struct vfio_pci_device *vdev)
 	vfio_device_put(device);
 }
 
+static void vfio_pci_replay_error(struct vfio_pci_device *vdev)
+{
+	if (vdev->keepalive_err_cnt) {
+		eventfd_signal(vdev->err_trigger, vdev->keepalive_err_cnt);
+		vdev->keepalive_err_cnt = 0;
+	}
+}
+
 static int vfio_pci_set_keepalive(void *device_data,
 				  struct vfio_keepalive_data *vka)
 {
@@ -1040,6 +1071,7 @@ static int vfio_pci_set_keepalive(void *device_data,
 		vfio_pci_free_keepalive_token(vdev);
 		vfio_pci_device_put(vdev);
 		dev_clear_keepalive(&vdev->pdev->dev);
+		vfio_pci_replay_error(vdev);
 	}
 
 	mutex_unlock(&vdev->reflck->lock);
@@ -2394,6 +2426,16 @@ static void vfio_pci_remove(struct pci_dev *pdev)
 	}
 }
 
+static void vfio_pci_record_error(struct vfio_pci_device *vdev)
+{
+	mutex_lock(&vdev->reflck->lock);
+	if (!vdev->refcnt)
+		vfio_pci_keepalive_inc_error(vdev);
+	else
+		vdev->keepalive_err_cnt++;
+	mutex_unlock(&vdev->reflck->lock);
+}
+
 static pci_ers_result_t vfio_pci_aer_err_detected(struct pci_dev *pdev,
 						  pci_channel_state_t state)
 {
@@ -2410,12 +2452,18 @@ static pci_ers_result_t vfio_pci_aer_err_detected(struct pci_dev *pdev,
 		return PCI_ERS_RESULT_DISCONNECT;
 	}
 
-	mutex_lock(&vdev->igate);
+	mutex_lock(&vdev->reflck->lock);
+	if (dev_is_keepalive(&pdev->dev)) {
+		vfio_pci_record_error(vdev);
+	} else {
+		mutex_lock(&vdev->igate);
 
-	if (vdev->err_trigger)
-		eventfd_signal(vdev->err_trigger, 1);
+		if (vdev->err_trigger)
+			eventfd_signal(vdev->err_trigger, 1);
 
-	mutex_unlock(&vdev->igate);
+		mutex_unlock(&vdev->igate);
+	}
+	mutex_unlock(&vdev->reflck->lock);
 
 	vfio_device_put(device);
 
