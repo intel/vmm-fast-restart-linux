@@ -589,11 +589,12 @@ void vfio_device_put(struct vfio_device *device)
 }
 EXPORT_SYMBOL_GPL(vfio_device_put);
 
-static void vfio_device_get(struct vfio_device *device)
+void vfio_device_get(struct vfio_device *device)
 {
 	vfio_group_get(device->group);
 	kref_get(&device->kref);
 }
+EXPORT_SYMBOL_GPL(vfio_device_get);
 
 static struct vfio_device *vfio_group_get_device(struct vfio_group *group,
 						 struct device *dev)
