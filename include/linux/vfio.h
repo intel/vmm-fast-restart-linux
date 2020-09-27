@@ -55,6 +55,7 @@ extern int vfio_add_group_dev(struct device *dev,
 extern void *vfio_del_group_dev(struct device *dev);
 extern struct vfio_device *vfio_device_get_from_dev(struct device *dev);
 extern void vfio_device_put(struct vfio_device *device);
+extern void vfio_device_get(struct vfio_device *device);
 extern void *vfio_device_data(struct vfio_device *device);
 
 /**
