@@ -14,6 +14,7 @@
 
 #include <linux/types.h>
 #include <linux/ioctl.h>
+#include <linux/uuid.h>
 
 #define VFIO_API_VERSION	0
 
@@ -121,6 +122,21 @@ struct vfio_info_cap_header {
  * Availability: When VFIO group attached
  */
 #define VFIO_SET_IOMMU			_IO(VFIO_TYPE, VFIO_BASE + 2)
+
+/**
+ * VFIO_SET_KEEPALIVE - _IOW(VFIO_TYPE, VFIO_BASE + 3,
+ * 						struct vfio_keepalive_data)
+ *
+ * Set the container into keepalive state. All groups and iommu will
+ * be set into keepalive state.
+ * Return: 0 on success, -errno on failure
+ * Availability: When VFIO group attached and iommu set.
+ */
+struct vfio_keepalive_data {
+	__u32 keepalive;
+	guid_t token;
+};
+#define VFIO_SET_KEEPALIVE		_IO(VFIO_TYPE, VFIO_BASE + 3)
 
 /* -------- IOCTLs for GROUP file descriptors (/dev/vfio/$GROUP) -------- */
 
