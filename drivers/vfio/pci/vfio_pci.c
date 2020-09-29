@@ -27,6 +27,9 @@
 #include <linux/vgaarb.h>
 #include <linux/nospec.h>
 #include <linux/sched/mm.h>
+#include <linux/irqdomain.h>
+
+#include <asm/irq_remapping.h>
 
 #include "vfio_pci_private.h"
 
@@ -791,6 +794,73 @@ int vfio_pci_register_dev_region(struct vfio_pci_device *vdev,
 	vdev->num_regions++;
 
 	return 0;
+}
+
+static int vfio_pci_device_get(struct vfio_pci_device *vdev)
+{
+	struct vfio_device *device;
+
+	device = vfio_device_get_from_dev(&vdev->pdev->dev);
+	if (!device)
+		return -ENOENT;
+
+	return 0;
+}
+
+static void vfio_pci_device_put(struct vfio_pci_device *vdev)
+{
+	struct vfio_device *device;
+
+	device = vfio_device_get_from_dev(&vdev->pdev->dev);
+	if (!device)
+		return;
+
+	vfio_device_put(device);
+	vfio_device_put(device);
+}
+
+static int vfio_pci_set_keepalive(void *device_data,
+				  struct vfio_keepalive_data *vka)
+{
+	struct vfio_pci_device *vdev = device_data;
+	bool keepalive = !!vka->keepalive;
+	int ret;
+
+	mutex_lock(&vdev->reflck->lock);
+
+	if (keepalive && !dev_is_keepalive(&vdev->pdev->dev)) {
+		if (vdev->pdev->current_state != PCI_D0) {
+			ret = -ENOTSUPP;
+			goto keepalive_out;
+		}
+
+		if (vdev->irq_type != VFIO_PCI_MSI_IRQ_INDEX &&
+		    vdev->irq_type != VFIO_PCI_MSIX_IRQ_INDEX) {
+			ret = -ENOTSUPP;
+			goto keepalive_out;
+		}
+
+		if (!irq_remapping_cap(IRQ_POSTING_CAP) ||
+		    !IS_ENABLED(CONFIG_HAVE_KVM_IRQ_BYPASS)) {
+			ret = -ENOTSUPP;
+			goto keepalive_out;
+		}
+
+		ret = vfio_pci_device_get(vdev);
+		if (ret)
+			goto keepalive_out;
+
+		dev_set_keepalive(&vdev->pdev->dev);
+	} else if (!keepalive && dev_is_keepalive(&vdev->pdev->dev)) {
+		vfio_pci_device_put(vdev);
+		dev_clear_keepalive(&vdev->pdev->dev);
+	}
+
+	mutex_unlock(&vdev->reflck->lock);
+	return 0;
+keepalive_out:
+	mutex_unlock(&vdev->reflck->lock);
+	return ret;
 }
 
 struct vfio_devices {
@@ -1896,6 +1966,7 @@ static const struct vfio_device_ops vfio_pci_ops = {
 	.mmap		= vfio_pci_mmap,
 	.request	= vfio_pci_request,
 	.match		= vfio_pci_match,
+	.set_keepalive	= vfio_pci_set_keepalive,
 };
 
 static int vfio_pci_reflck_attach(struct vfio_pci_device *vdev);
@@ -2039,9 +2110,10 @@ static void vfio_pci_remove(struct pci_dev *pdev)
 {
 	struct vfio_pci_device *vdev;
 
+	vdev = vfio_del_group_dev(&pdev->dev);
+
 	pci_disable_sriov(pdev);
 
-	vdev = vfio_del_group_dev(&pdev->dev);
 	if (!vdev)
 		return;
 

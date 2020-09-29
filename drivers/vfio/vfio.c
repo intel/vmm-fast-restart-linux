@@ -970,7 +970,7 @@ void *vfio_del_group_dev(struct device *dev)
 		if (!device)
 			break;
 
-		if (device->ops->request)
+		if (!dev_is_keepalive(dev) && device->ops->request)
 			device->ops->request(device_data, i++);
 
 		vfio_device_put(device);
