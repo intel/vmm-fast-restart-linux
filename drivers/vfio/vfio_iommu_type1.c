@@ -74,6 +74,7 @@ struct vfio_iommu {
 	bool			nesting;
 	bool			dirty_page_tracking;
 	bool			pinned_page_dirty_scope;
+	bool			keepalive;
 };
 
 struct vfio_domain {
@@ -2851,6 +2852,20 @@ out_unlock:
 	return -EINVAL;
 }
 
+static int vfio_iommu_type1_set_keepalive(void *iommu_data,
+					  struct vfio_keepalive_data *vka)
+{
+	struct vfio_iommu *iommu = iommu_data;
+	int ret;
+
+	mutex_lock(&iommu->lock);
+
+	iommu->keepalive = !!vka->keepalive;
+	ret = 0;
+	mutex_unlock(&iommu->lock);
+	return ret;
+}
+
 static long vfio_iommu_type1_ioctl(void *iommu_data,
 				   unsigned int cmd, unsigned long arg)
 {
@@ -2993,6 +3008,7 @@ static const struct vfio_iommu_driver_ops vfio_iommu_driver_ops_type1 = {
 	.register_notifier	= vfio_iommu_type1_register_notifier,
 	.unregister_notifier	= vfio_iommu_type1_unregister_notifier,
 	.dma_rw			= vfio_iommu_type1_dma_rw,
+	.set_keepalive		= vfio_iommu_type1_set_keepalive,
 };
 
 static int __init vfio_iommu_type1_init(void)
