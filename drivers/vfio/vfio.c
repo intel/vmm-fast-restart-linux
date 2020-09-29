@@ -1174,11 +1174,25 @@ static long vfio_ioctl_set_keepalive(struct vfio_container *container,
 {
 	struct vfio_group *group;
 	struct vfio_device *device;
+	struct vfio_iommu_driver *driver;
 	struct vfio_keepalive_data vka;
 	int ret;
 
 	if (copy_from_user(&vka, (void __user *)arg, sizeof(vka)))
 		return -EINVAL;
+
+	mutex_lock(&vfio.iommu_drivers_lock);
+	driver = container->iommu_driver;
+	if (!driver->ops->set_keepalive) {
+		mutex_unlock(&vfio.iommu_drivers_lock);
+		return -ENOTSUPP;
+	}
+	ret = driver->ops->set_keepalive(container->iommu_data, &vka);
+	if (ret) {
+		mutex_unlock(&vfio.iommu_drivers_lock);
+		return ret;
+	}
+	mutex_unlock(&vfio.iommu_drivers_lock);
 
 	down_write(&container->group_lock);
 	list_for_each_entry(group, &container->group_list, container_next) {
@@ -1195,7 +1209,6 @@ static long vfio_ioctl_set_keepalive(struct vfio_container *container,
 		}
 	}
 	up_write(&container->group_lock);
-
 	return 0;
 unwind_dev:
 	vka.keepalive = !vka.keepalive;
@@ -1210,6 +1223,12 @@ unwind_dev:
 		}
 	}
 	up_write(&container->group_lock);
+
+	mutex_lock(&vfio.iommu_drivers_lock);
+	driver = container->iommu_driver;
+	if (driver->ops->set_keepalive)
+		driver->ops->set_keepalive(container->iommu_data, &vka);
+	mutex_unlock(&vfio.iommu_drivers_lock);
 	return ret;
 }
 
