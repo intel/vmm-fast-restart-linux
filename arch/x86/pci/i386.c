@@ -291,7 +291,7 @@ static void pcibios_allocate_dev_resources(struct pci_dev *dev, int pass)
 		}
 	if (!pass) {
 		r = &dev->resource[PCI_ROM_RESOURCE];
-		if (r->flags & IORESOURCE_ROM_ENABLE) {
+		if ((r->flags & IORESOURCE_ROM_ENABLE) && !dev_is_keepalive(&dev->dev)) {
 			/* Turn the ROM off, leave the resource region,
 			 * but keep it unregistered. */
 			u32 reg;
