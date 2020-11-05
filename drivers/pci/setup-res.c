@@ -345,7 +345,7 @@ int pci_assign_resource(struct pci_dev *dev, int resno)
 	res->flags &= ~IORESOURCE_UNSET;
 	res->flags &= ~IORESOURCE_STARTALIGN;
 	pci_info(dev, "BAR %d: assigned %pR\n", resno, res);
-	if (resno < PCI_BRIDGE_RESOURCES)
+	if (resno < PCI_BRIDGE_RESOURCES && !dev_is_keepalive(&dev->dev))
 		pci_update_resource(dev, resno);
 
 	return 0;
