@@ -15,6 +15,7 @@
 #include <linux/iscsi_ibft.h>
 #include <linux/memblock.h>
 #include <linux/pci.h>
+#include <linux/pkram.h>
 #include <linux/root_dev.h>
 #include <linux/sfi.h>
 #include <linux/hugetlb.h>
@@ -1163,6 +1164,8 @@ void __init setup_arch(char **cmdline_p)
 	x86_init.paging.pagetable_init();
 
 	kasan_init();
+
+	pkram_reserve();
 
 	/*
 	 * Sync back kernel address range.
