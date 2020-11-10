@@ -16,6 +16,7 @@
 #include <linux/syscalls.h>
 #include <linux/vmalloc.h>
 #include <linux/slab.h>
+#include <linux/pkram.h>
 
 #include "kexec_internal.h"
 
@@ -162,6 +163,14 @@ static int do_kexec_load(unsigned long entry, unsigned long nr_segments,
 	ret = machine_kexec_post_load(image);
 	if (ret)
 		goto out;
+
+	for (i = 0; i < nr_segments; i++) {
+		unsigned long mem = image->segment[i].mem;
+		size_t memsz = image->segment[i].memsz;
+
+		if (memsz)
+			pkram_ban_region(PFN_DOWN(mem), PFN_UP(mem + memsz) - 1);
+	}
 
 	/* Install the new kernel and uninstall the old */
 	image = xchg(dest_image, image);
