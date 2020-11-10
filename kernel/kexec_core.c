@@ -37,6 +37,7 @@
 #include <linux/compiler.h>
 #include <linux/hugetlb.h>
 #include <linux/objtool.h>
+#include <linux/pkram.h>
 
 #include <asm/page.h>
 #include <asm/sections.h>
@@ -175,6 +176,8 @@ int sanity_check_segment_list(struct kimage *image)
 		if ((mstart & ~PAGE_MASK) || (mend & ~PAGE_MASK))
 			return -EADDRNOTAVAIL;
 		if (mend >= KEXEC_DESTINATION_MEMORY_LIMIT)
+			return -EADDRNOTAVAIL;
+		if (pkram_has_preserved_pages(mstart, mend))
 			return -EADDRNOTAVAIL;
 	}
 
