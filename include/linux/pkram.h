@@ -25,6 +25,21 @@ struct pkram_stream {
 
 #define PKRAM_NAME_MAX		256	/* including nul */
 
+struct pkram_pg_state {
+	int (*range_cb)(struct pkram_pg_state *state, unsigned long base,
+			unsigned long size);
+	unsigned long curr_addr;
+	unsigned long end_addr;
+	unsigned long min_addr;
+	unsigned long max_addr;
+	unsigned long min_size;
+	bool tracking;
+	bool find_holes;
+	unsigned long retval;
+};
+
+void pkram_walk_pgt_rev(struct pkram_pg_state *st, pgd_t *pgd);
+
 int pkram_prepare_save(struct pkram_stream *ps, const char *name,
 		       gfp_t gfp_mask);
 int pkram_prepare_save_obj(struct pkram_stream *ps);
