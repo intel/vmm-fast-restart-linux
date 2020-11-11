@@ -115,6 +115,25 @@ static inline void console_init(void)
 { }
 #endif
 
+void ___process_mem_region(struct mem_vector *entry,
+			   unsigned long minimum,
+			   unsigned long image_size);
+
+#ifdef CONFIG_PKRAM
+void pkram_init(void);
+int pkram_enabled(void);
+void pkram_process_mem_region(struct mem_vector *entry,
+			      unsigned long minimum,
+			      unsigned long image_size);
+#else
+static inline void pkram_init(void) { }
+static inline int pkram_enabled(void) { return 0; }
+static inline void pkram_process_mem_region(struct mem_vector *entry,
+					    unsigned long minimum,
+					    unsigned long image_size)
+{ ___process_mem_region(entry, minimum, image_size); }
+#endif
+
 void set_sev_encryption_mask(void);
 
 #ifdef CONFIG_AMD_MEM_ENCRYPT

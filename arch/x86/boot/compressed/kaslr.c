@@ -581,7 +581,7 @@ static u64 slots_fetch_random(void)
 	return 0;
 }
 
-static void __process_mem_region(struct mem_vector *entry,
+void ___process_mem_region(struct mem_vector *entry,
 				 unsigned long minimum,
 				 unsigned long image_size)
 {
@@ -623,6 +623,39 @@ static void __process_mem_region(struct mem_vector *entry,
 		/* Clip off the overlapping region and start over. */
 		region.start = overlap.start + overlap.size;
 	}
+}
+
+static void __process_mem_region(struct mem_vector *entry,
+				 unsigned long minimum,
+				 unsigned long image_size)
+{
+	struct mem_vector region, overlap;
+	unsigned long start_orig, end;
+	struct mem_vector cur_entry;
+
+	/* On 32-bit, ignore entries entirely above our maximum. */
+	if (IS_ENABLED(CONFIG_X86_32) && entry->start >= KERNEL_IMAGE_SIZE)
+		return;
+
+	/* Ignore entries entirely below our minimum. */
+	if (entry->start + entry->size < minimum)
+		return;
+
+	/* Ignore entries above memory limit */
+	end = min(entry->size + entry->start, mem_limit);
+	if (entry->start >= end)
+		return;
+	cur_entry.start = entry->start;
+	cur_entry.size = end - entry->start;
+
+	/* Return if region can't contain decompressed kernel */
+	if (cur_entry.size < image_size)
+		return;
+
+	if (pkram_enabled())
+		return pkram_process_mem_region(&cur_entry, minimum, image_size);
+	else
+		return ___process_mem_region(&cur_entry, minimum, image_size);
 }
 
 static bool process_mem_region(struct mem_vector *region,
@@ -840,6 +873,8 @@ void choose_random_location(unsigned long input,
 		return;
 	}
 
+	pkram_init();
+
 	boot_params->hdr.loadflags |= KASLR_FLAG;
 
 	if (IS_ENABLED(CONFIG_X86_32))
@@ -874,4 +909,9 @@ void choose_random_location(unsigned long input,
 	if (IS_ENABLED(CONFIG_X86_64))
 		random_addr = find_random_virt_addr(LOAD_PHYSICAL_ADDR, output_size);
 	*virt_addr = random_addr;
+}
+
+int slot_areas_full(void)
+{
+	return slot_area_index == MAX_SLOT_AREA;
 }
