@@ -1699,6 +1699,28 @@ struct pci_saved_state {
 	struct pci_cap_saved_data cap[];
 };
 
+int pci_saved_state_size(void *s)
+{
+	struct pci_saved_state *state = s;
+	struct pci_cap_saved_data *cap;
+	int size;
+
+	if (!state)
+		return 0;
+
+	size = sizeof(*state) + sizeof(struct pci_cap_saved_data);
+	cap = state->cap;
+	while (cap->size) {
+		int cap_size = sizeof(struct pci_cap_saved_data) + cap->size;
+
+		size += cap_size;
+		cap = (struct pci_cap_saved_data *)((u8 *)cap + cap_size);
+	}
+
+	return size;
+}
+EXPORT_SYMBOL(pci_saved_state_size);
+
 /**
  * pci_store_saved_state - Allocate and return an opaque struct containing
  *			   the device saved state.
