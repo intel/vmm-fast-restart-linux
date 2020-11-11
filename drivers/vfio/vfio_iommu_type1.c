@@ -1964,6 +1964,57 @@ static void vfio_iommu_iova_insert_copy(struct vfio_iommu *iommu,
 	list_splice_tail(iova_copy, iova);
 }
 
+struct dev_keepalive_info {
+	bool initialized;
+	bool keepalive;
+};
+
+static int vfio_check_dev_keepalive(struct device *dev, void *data)
+{
+	struct dev_keepalive_info *info = data;
+
+	if (info->initialized && info->keepalive != dev->keepalive)
+		return -EINVAL;
+
+	info->initialized = true;
+	info->keepalive = dev->keepalive;
+
+	return 0;
+}
+
+/*
+ * Try to restore the keepalive flag of the iommu.
+ *
+ * If all devices in the iommu_group are keepalive, the iommu that the
+ * iommu_group attached to should also be keepalive.
+ */
+static int try_restore_keepalive_iommu(struct vfio_iommu *iommu,
+				       struct iommu_group *iommu_group)
+{
+	struct dev_keepalive_info info;
+	int ret;
+
+	/* Determine keepalive flag */
+	info.initialized = false;
+	ret = iommu_group_for_each_dev(iommu_group, &info,
+				       vfio_check_dev_keepalive);
+	if (ret || (iommu->keepalive && !info.keepalive))
+		return -EINVAL;
+
+	if (info.keepalive) {
+		/*
+		 * Should be first time attach domain if we are about to set
+		 * keepalive flag for vfio_iommu
+		 */
+		if (!iommu->keepalive && !list_empty(&iommu->domain_list))
+			return -EINVAL;
+
+		iommu->keepalive = info.keepalive;
+	}
+
+	return 0;
+}
+
 static int vfio_iommu_type1_attach_group(void *iommu_data,
 					 struct iommu_group *iommu_group)
 {
@@ -1982,6 +2033,12 @@ static int vfio_iommu_type1_attach_group(void *iommu_data,
 
 	/* Check for duplicates */
 	if (vfio_iommu_find_iommu_group(iommu, iommu_group)) {
+		mutex_unlock(&iommu->lock);
+		return -EINVAL;
+	}
+
+	ret = try_restore_keepalive_iommu(iommu, iommu_group);
+	if (ret) {
 		mutex_unlock(&iommu->lock);
 		return -EINVAL;
 	}
