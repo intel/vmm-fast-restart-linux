@@ -226,6 +226,9 @@ int pci_enable_pcie_error_reporting(struct pci_dev *dev)
 {
 	int rc;
 
+	if (dev_is_keepalive(&dev->dev))
+		return 0;
+
 	if (!pcie_aer_is_native(dev))
 		return -EIO;
 
@@ -385,7 +388,8 @@ void pci_aer_init(struct pci_dev *dev)
 	n = pcie_cap_has_rtctl(dev) ? 5 : 4;
 	pci_add_ext_cap_save_buffer(dev, PCI_EXT_CAP_ID_ERR, sizeof(u32) * n);
 
-	pci_aer_clear_status(dev);
+	if (!dev_is_keepalive(&dev->dev))
+		pci_aer_clear_status(dev);
 }
 
 void pci_aer_exit(struct pci_dev *dev)
@@ -1248,26 +1252,28 @@ static void aer_enable_rootport(struct aer_rpc *rpc)
 	u32 reg32;
 
 	/* Clear PCIe Capability's Device Status */
-	pcie_capability_read_word(pdev, PCI_EXP_DEVSTA, &reg16);
-	pcie_capability_write_word(pdev, PCI_EXP_DEVSTA, reg16);
+	if (!dev_is_keepalive(&pdev->dev)) {
+		pcie_capability_read_word(pdev, PCI_EXP_DEVSTA, &reg16);
+		pcie_capability_write_word(pdev, PCI_EXP_DEVSTA, reg16);
 
-	/* Disable system error generation in response to error messages */
-	pcie_capability_clear_word(pdev, PCI_EXP_RTCTL,
-				   SYSTEM_ERROR_INTR_ON_MESG_MASK);
+		/* Disable system error generation in response to error messages */
+		pcie_capability_clear_word(pdev, PCI_EXP_RTCTL,
+					   SYSTEM_ERROR_INTR_ON_MESG_MASK);
 
-	/* Clear error status */
-	pci_read_config_dword(pdev, aer + PCI_ERR_ROOT_STATUS, &reg32);
-	pci_write_config_dword(pdev, aer + PCI_ERR_ROOT_STATUS, reg32);
-	pci_read_config_dword(pdev, aer + PCI_ERR_COR_STATUS, &reg32);
-	pci_write_config_dword(pdev, aer + PCI_ERR_COR_STATUS, reg32);
-	pci_read_config_dword(pdev, aer + PCI_ERR_UNCOR_STATUS, &reg32);
-	pci_write_config_dword(pdev, aer + PCI_ERR_UNCOR_STATUS, reg32);
+		/* Clear error status */
+		pci_read_config_dword(pdev, aer + PCI_ERR_ROOT_STATUS, &reg32);
+		pci_write_config_dword(pdev, aer + PCI_ERR_ROOT_STATUS, reg32);
+		pci_read_config_dword(pdev, aer + PCI_ERR_COR_STATUS, &reg32);
+		pci_write_config_dword(pdev, aer + PCI_ERR_COR_STATUS, reg32);
+		pci_read_config_dword(pdev, aer + PCI_ERR_UNCOR_STATUS, &reg32);
+		pci_write_config_dword(pdev, aer + PCI_ERR_UNCOR_STATUS, reg32);
 
-	/*
-	 * Enable error reporting for the root port device and downstream port
-	 * devices.
-	 */
-	set_downstream_devices_error_reporting(pdev, true);
+		/*
+		 * Enable error reporting for the root port device and downstream port
+		 * devices.
+		 */
+		set_downstream_devices_error_reporting(pdev, true);
+	}
 
 	/* Enable Root Port's interrupt in response to error messages */
 	pci_read_config_dword(pdev, aer + PCI_ERR_ROOT_COMMAND, &reg32);
@@ -1291,7 +1297,8 @@ static void aer_disable_rootport(struct aer_rpc *rpc)
 	 * Disable error reporting for the root port device and downstream port
 	 * devices.
 	 */
-	set_downstream_devices_error_reporting(pdev, false);
+	if (!dev_is_keepalive(&pdev->dev))
+		set_downstream_devices_error_reporting(pdev, false);
 
 	/* Disable Root's interrupt in response to error messages */
 	pci_read_config_dword(pdev, aer + PCI_ERR_ROOT_COMMAND, &reg32);
@@ -1299,8 +1306,10 @@ static void aer_disable_rootport(struct aer_rpc *rpc)
 	pci_write_config_dword(pdev, aer + PCI_ERR_ROOT_COMMAND, reg32);
 
 	/* Clear Root's error status reg */
-	pci_read_config_dword(pdev, aer + PCI_ERR_ROOT_STATUS, &reg32);
-	pci_write_config_dword(pdev, aer + PCI_ERR_ROOT_STATUS, reg32);
+	if (!dev_is_keepalive(&pdev->dev)) {
+		pci_read_config_dword(pdev, aer + PCI_ERR_ROOT_STATUS, &reg32);
+		pci_write_config_dword(pdev, aer + PCI_ERR_ROOT_STATUS, reg32);
+	}
 }
 
 /**
