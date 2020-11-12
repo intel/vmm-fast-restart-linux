@@ -257,11 +257,23 @@ static inline void context_set_translation_type(struct context_entry *context,
 	context->lo |= (value & 3) << 2;
 }
 
+static inline
+unsigned int context_translation_type(struct context_entry *context)
+{
+	return (context->lo >> 2) & 3;
+}
+
 static inline void context_set_address_root(struct context_entry *context,
 					    unsigned long value)
 {
 	context->lo &= ~VTD_PAGE_MASK;
 	context->lo |= value & VTD_PAGE_MASK;
+}
+
+static inline
+unsigned long context_address_root(struct context_entry *context)
+{
+	return context->lo & VTD_PAGE_MASK;
 }
 
 static inline void context_set_address_width(struct context_entry *context,
@@ -2008,7 +2020,7 @@ static void domain_exit(struct dmar_domain *domain)
 	if (domain->domain.type == IOMMU_DOMAIN_DMA)
 		put_iova_domain(&domain->iovad);
 
-	if (domain->pgd) {
+	if (domain->pgd && !iommu_domain_is_keepalive(&domain->domain)) {
 		struct page *freelist;
 
 		freelist = domain_unmap(domain, 0, DOMAIN_MAX_PFN(domain->gaw));
@@ -2598,6 +2610,56 @@ static bool dev_is_real_dma_subdevice(struct device *dev)
 	       pci_real_dma_dev(to_pci_dev(dev)) != to_pci_dev(dev);
 }
 
+static int domain_keepalive_reattach_iommu(struct dmar_domain *domain,
+					   struct intel_iommu *iommu,
+					   struct device_domain_info *info)
+{
+	struct context_entry *context;
+	unsigned int translation;
+	struct dma_pte *pgd;
+	u16 domain_id;
+
+	assert_spin_locked(&device_domain_lock);
+	assert_spin_locked(&iommu->lock);
+
+	context = iommu_context_addr(iommu, info->bus, info->devfn, 0);
+	if (!context || !context_present(context)) {
+		pr_warn("context present bit is not set\n");
+		return -ENODEV;
+	}
+
+	domain_id = context_domain_id(context);
+	pgd = phys_to_virt(context_address_root(context));
+
+	translation = context_translation_type(context);
+	if ((translation == CONTEXT_TT_PASS_THROUGH) ||
+	    (info->ats_supported && translation != CONTEXT_TT_DEV_IOTLB) ||
+	    (!info->ats_supported && translation != CONTEXT_TT_MULTI_LEVEL)) {
+		pr_warn("%s: unmatched xlation type %u, ats_support %u\n",
+			__func__, translation,
+			(unsigned int)info->ats_supported);
+		return -EINVAL;
+	}
+
+	if (domain->pgd != pgd) {
+		if (!list_empty(&domain->devices)) {
+			pr_warn("%s: domain has been attached to other devices\n",
+				__func__);
+			return -EBUSY;
+		}
+		free_pgtable_page(domain->pgd);
+		domain->pgd = pgd;
+		domain_flush_cache(domain, domain->pgd, PAGE_SIZE);
+	}
+
+	domain->iommu_did[iommu->seq_id] = domain_id;
+	set_iommu_domain(iommu, domain_id, domain);
+	domain->nid = iommu->node;
+	domain_update_iommu_cap(domain);
+
+	return 0;
+}
+
 static struct dmar_domain *dmar_insert_one_dev_info(struct intel_iommu *iommu,
 						    int bus, int devfn,
 						    struct device *dev,
@@ -2677,7 +2739,10 @@ static struct dmar_domain *dmar_insert_one_dev_info(struct intel_iommu *iommu,
 	}
 
 	spin_lock(&iommu->lock);
-	ret = domain_attach_iommu(domain, iommu);
+	if (iommu_domain_is_keepalive(&domain->domain))
+		ret = domain_keepalive_reattach_iommu(domain, iommu, info);
+	else
+		ret = domain_attach_iommu(domain, iommu);
 	spin_unlock(&iommu->lock);
 
 	if (ret) {
@@ -5036,6 +5101,23 @@ static void domain_context_clear(struct intel_iommu *iommu, struct device *dev)
 	pci_for_each_dma_alias(to_pci_dev(dev), &domain_context_clear_one_cb, iommu);
 }
 
+static void domain_keepalive_detach_iommu(struct dmar_domain *domain,
+					  struct intel_iommu *iommu,
+					  struct device_domain_info *info)
+{
+	assert_spin_locked(&device_domain_lock);
+	assert_spin_locked(&iommu->lock);
+
+	domain->iommu_refcnt[iommu->seq_id] -= 1;
+	--domain->iommu_count;
+	if (domain->iommu_refcnt[iommu->seq_id] == 0) {
+		u16 num = domain->iommu_did[iommu->seq_id];
+
+		set_iommu_domain(iommu, num, NULL);
+		domain->iommu_did[iommu->seq_id] = 0;
+	}
+}
+
 static void __dmar_remove_one_dev_info(struct device_domain_info *info)
 {
 	struct dmar_domain *domain;
@@ -5049,6 +5131,15 @@ static void __dmar_remove_one_dev_info(struct device_domain_info *info)
 
 	iommu = info->iommu;
 	domain = info->domain;
+
+	if (iommu_domain_is_keepalive(&domain->domain)) {
+		unlink_domain_info(info);
+		spin_lock_irqsave(&iommu->lock, flags);
+		domain_keepalive_detach_iommu(domain, iommu, info);
+		spin_unlock_irqrestore(&iommu->lock, flags);
+		free_devinfo_mem(info);
+		return;
+	}
 
 	if (info->dev) {
 		if (dev_is_pci(info->dev) && sm_supported(iommu))
