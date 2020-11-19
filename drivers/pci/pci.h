@@ -97,8 +97,14 @@ struct pci_keepalive_state {
 	unsigned int	ptm_enabled:1;
 	u8		ptm_granularity;
 #endif
+#ifdef CONFIG_PCIE_DPC
+	u16		dpc_cap;
+	unsigned int	dpc_rp_extensions:1;
+	u8		dpc_rp_log_size;
+#endif
 	u8		msi_cap;
 	u8		msix_cap;
+	u16		acs_cap;	/* ACS Capability offset */
 
 	u8		rom_base_reg;		/* Config register controlling ROM */
 	unsigned int	io_window:1;		/* Bridge has I/O window */

@@ -2628,9 +2628,17 @@ pci_build_keepalive_dev(struct pci_bus *bus, struct pci_keepalive_state *state)
 	dev->ptm_enabled = state->ptm_enabled;
 	dev->ptm_granularity = state->ptm_granularity;
 #endif
+#ifdef CONFIG_PCIE_DPC
+	dev->dpc_cap = state->dpc_cap;
+	dev->dpc_rp_extensions = state->dpc_rp_extensions;
+	dev->dpc_rp_log_size = state->dpc_rp_log_size;
+#endif
 	dev->dev_flags = state->dev_flags;
+
 	dev->msi_cap = state->msi_cap;
 	dev->msix_cap = state->msix_cap;
+	dev->acs_cap = state->acs_cap;
+
 	dev->rom_base_reg = state->rom_base_reg;
 	dev->io_window = state->io_window;
 	dev->pref_window = state->pref_window;
@@ -2671,6 +2679,7 @@ bypass_restore_resource:
 	pci_pasid_init(dev);		/* Process Address Space ID */
 	pci_aer_init(dev);		/* Advanced Error Reporting */
 
+	/* TODO: need to verify PTM, DPC and other pcie port services.*/
 	/*
 	 * Add the device to our list of discovered devices
 	 * and the bus list for fixup functions, etc.
