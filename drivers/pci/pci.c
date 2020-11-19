@@ -6754,9 +6754,15 @@ static void copy_keepalive_state(struct pci_dev *pdev,
 	state->ptm_enabled = pdev->ptm_enabled;
 	state->ptm_granularity = pdev->ptm_granularity;
 #endif
+#ifdef CONFIG_PCIE_DPC
+	state->dpc_cap = pdev->dpc_cap;
+	state->dpc_rp_extensions = pdev->dpc_rp_extensions;
+	state->dpc_rp_log_size = pdev->dpc_rp_log_size;
+#endif
 
 	state->msi_cap = pdev->msi_cap;
 	state->msix_cap = pdev->msix_cap;
+	state->acs_cap = pdev->acs_cap;
 
 	state->rom_base_reg = pdev->rom_base_reg;
 	state->io_window = pdev->io_window;
