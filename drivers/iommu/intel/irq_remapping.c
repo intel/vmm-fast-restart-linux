@@ -44,7 +44,10 @@ struct hpet_scope {
 };
 
 struct irq_2_iommu {
-	struct intel_iommu *iommu;
+	union {
+		struct intel_iommu *iommu;
+		int iommu_seq_id;
+	};
 	u16 irte_index;
 	u16 sub_handle;
 	u8  irte_mask;
@@ -1424,10 +1427,13 @@ static void intel_free_irq_resources(struct irq_domain *domain,
 			pdev = data->irq_2_dev.pdev;
 
 			if (pdev && pci_is_keepalive_dev(pdev)) {
+				struct intel_iommu *iommu = data->irq_2_iommu.iommu;
+
 				dev_dbg(&pdev->dev, "%s: detach virq %u\n",
 					__func__, virq + i);
 
 				data->irq_2_dev.bdf = pci_dev_id(pdev);
+				data->irq_2_iommu.iommu_seq_id = iommu->seq_id;
 				irq_domain_reset_irq_data(irq_data);
 				spin_lock(&ir_data_lock);
 				list_add_tail(&data->list, &intel_ir_data_list);
