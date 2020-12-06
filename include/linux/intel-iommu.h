@@ -610,6 +610,8 @@ struct intel_iommu {
 	u32		flags;      /* Software defined flags */
 
 	struct dmar_drhd_unit *drhd;
+
+	bool		keepalive;
 };
 
 struct intel_iommu_state {
