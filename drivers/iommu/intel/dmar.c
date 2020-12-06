@@ -1174,7 +1174,7 @@ static void free_iommu(struct intel_iommu *iommu)
 
 	if (iommu->qi) {
 		free_page((unsigned long)iommu->qi->desc);
-		kfree(iommu->qi->desc_status);
+		free_page((unsigned long)iommu->qi->desc_status);
 		kfree(iommu->qi);
 	}
 
@@ -1640,13 +1640,14 @@ int dmar_enable_qi(struct intel_iommu *iommu)
 
 	qi->desc = page_address(page);
 
-	qi->desc_status = kcalloc(QI_LENGTH, sizeof(int), GFP_ATOMIC);
-	if (!qi->desc_status) {
+	page = alloc_page(GFP_ATOMIC | __GFP_ZERO);
+	if (!page) {
 		free_page((unsigned long) qi->desc);
 		kfree(qi);
 		iommu->qi = NULL;
 		return -ENOMEM;
 	}
+	qi->desc_status = page_address(page);
 
 	raw_spin_lock_init(&qi->q_lock);
 
