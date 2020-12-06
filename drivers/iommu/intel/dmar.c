@@ -1197,13 +1197,8 @@ error:
 	return err;
 }
 
-static void free_iommu(struct intel_iommu *iommu)
+static void free_iommu_irq(struct intel_iommu *iommu)
 {
-	if (intel_iommu_enabled && !iommu->drhd->ignored) {
-		iommu_device_unregister(&iommu->iommu);
-		iommu_device_sysfs_remove(&iommu->iommu);
-	}
-
 	if (iommu->irq) {
 		if (iommu->pr_irq) {
 			free_irq(iommu->pr_irq, iommu);
@@ -1214,6 +1209,16 @@ static void free_iommu(struct intel_iommu *iommu)
 		dmar_free_hwirq(iommu->irq);
 		iommu->irq = 0;
 	}
+}
+
+static void free_iommu(struct intel_iommu *iommu)
+{
+	if (intel_iommu_enabled && !iommu->drhd->ignored) {
+		iommu_device_unregister(&iommu->iommu);
+		iommu_device_sysfs_remove(&iommu->iommu);
+	}
+
+	free_iommu_irq(iommu);
 
 	if (iommu->qi) {
 		free_page((unsigned long)iommu->qi->desc);
@@ -2030,6 +2035,17 @@ int dmar_set_interrupt(struct intel_iommu *iommu)
 	if (ret)
 		pr_err("Can't request irq\n");
 	return ret;
+}
+
+void iommu_disable_fault_handling(struct intel_iommu *iommu)
+{
+	u32 fault_status;
+
+	free_iommu_irq(iommu);
+
+	dmar_fault(iommu->irq, iommu);
+	fault_status = readl(iommu->reg + DMAR_FSTS_REG);
+	writel(fault_status, iommu->reg + DMAR_FSTS_REG);
 }
 
 int __init enable_drhd_fault_handling(void)
