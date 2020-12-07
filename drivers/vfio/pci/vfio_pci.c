@@ -2390,6 +2390,10 @@ static int vfio_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		vfio_pci_set_power_state(vdev, PCI_D3hot);
 	}
 
+	/* keepalive flag means an extra refcnt */
+	if (dev_is_keepalive(&pdev->dev))
+		vfio_device_get_from_dev(&pdev->dev);
+
 	return ret;
 
 out_vf_token:
