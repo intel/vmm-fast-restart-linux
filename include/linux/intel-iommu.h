@@ -523,6 +523,8 @@ struct context_entry {
 #define DOMAIN_FLAG_NESTING_MODE		BIT(2)
 
 struct dmar_domain {
+	struct list_head list;
+
 	int	nid;			/* node id */
 
 	unsigned	iommu_refcnt[DMAR_UNITS_SUPPORTED];

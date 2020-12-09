@@ -382,6 +382,9 @@ struct device_domain_info *get_domain_info(struct device *dev)
 DEFINE_SPINLOCK(device_domain_lock);
 static LIST_HEAD(device_domain_list);
 
+DEFINE_MUTEX(dmar_domain_lock);
+static LIST_HEAD(dmar_domain_list);
+
 #define device_needs_bounce(d) (!intel_no_bounce && dev_is_pci(d) &&	\
 				to_pci_dev(d)->untrusted)
 
@@ -2014,6 +2017,10 @@ static void domain_exit(struct dmar_domain *domain)
 		freelist = domain_unmap(domain, 0, DOMAIN_MAX_PFN(domain->gaw));
 		dma_free_pagelist(freelist);
 	}
+
+	mutex_lock(&dmar_domain_lock);
+	list_del(&domain->list);
+	mutex_unlock(&dmar_domain_lock);
 
 	free_domain_mem(domain);
 }
@@ -5142,6 +5149,10 @@ static struct iommu_domain *intel_iommu_domain_alloc(unsigned type)
 		domain->geometry.aperture_end   =
 				__DOMAIN_MAX_ADDR(dmar_domain->gaw);
 		domain->geometry.force_aperture = true;
+
+		mutex_lock(&dmar_domain_lock);
+		list_add(&dmar_domain->list, &dmar_domain_list);
+		mutex_unlock(&dmar_domain_lock);
 
 		return domain;
 	case IOMMU_DOMAIN_IDENTITY:
