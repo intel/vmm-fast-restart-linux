@@ -7344,6 +7344,9 @@ static int save_intel_iommu(void)
 		pr_warn("failed to save intel iommu root table \n");
 	}
 
+	free_keepalive_devices();
+	free_keepalive_devinfo_list();
+
 	return 0;
 }
 
@@ -7375,3 +7378,16 @@ static int __init intel_iommu_load_init(void)
 }
 fs_initcall(intel_iommu_load_init);
 
+static int __init intel_iommu_finish_keepalive_load(void)
+{
+	free_keepalive_devices();
+	/*
+	 * keepalive device restores its domain in intel_iommu_init()
+	 * which is in rootfs_initcall phase, so we need to free
+	 * keepalive_devinfo later than that
+	 */
+	free_keepalive_devinfo_list();
+
+	return 0;
+}
+device_initcall(intel_iommu_finish_keepalive_load);
