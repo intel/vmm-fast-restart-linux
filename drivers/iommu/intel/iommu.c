@@ -932,6 +932,21 @@ struct intel_iommu *device_to_iommu(struct device *dev, u8 *bus, u8 *devfn)
 	return iommu;
 }
 
+static int try_mark_keepalive_iommu(struct device_domain_info *info, void *data)
+{
+	bool val = data;
+
+	if (dev_is_keepalive(info->dev) && dev_is_pci(info->dev))
+		info->iommu->keepalive = val;
+
+	return 0;
+}
+
+void mark_keepalive_iommu(bool val)
+{
+	for_each_device_domain(try_mark_keepalive_iommu, (void *)val);
+}
+
 static void domain_flush_cache(struct dmar_domain *domain,
 			       void *addr, int size)
 {
