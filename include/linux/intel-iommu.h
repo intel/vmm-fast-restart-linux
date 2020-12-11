@@ -612,6 +612,28 @@ struct intel_iommu {
 	struct dmar_drhd_unit *drhd;
 };
 
+struct intel_iommu_state {
+	u64 		reg_phys;
+	int		seq_id;
+	u16		segment;
+	int		agaw;
+#ifdef CONFIG_INTEL_IOMMU
+	unsigned long 	*domain_ids;
+	size_t		domain_ids_size;
+	struct page	*root_entry_page;
+#endif
+	struct page *qi_desc_page;
+	struct page *qi_desc_status;
+	int qi_free_head;
+	int qi_free_tail;
+	int qi_free_cnt;
+
+#ifdef CONFIG_IRQ_REMAP
+	struct irte *ir_table_base;
+#endif
+	struct list_head list;
+ };
+
 /* PCI domain-device relationship */
 struct device_domain_info {
 	struct list_head link;	/* link to domain siblings */
