@@ -6328,6 +6328,40 @@ static void __init check_tylersburg_isoch(void)
 	pr_warn("Recommended TLB entries for ISOCH unit is 16; your BIOS set %d\n",
 	       vtisochctrl);
 }
+struct did_ctx {
+	struct intel_iommu *iommu;
+	unsigned long *domain_ids;
+};
+
+static int iommu_set_domain_id_bit(struct device_domain_info *info, void *data)
+{
+	struct did_ctx *ctx = data;
+	struct device *dev = info->dev;
+	struct pci_dev *pdev;
+	u16 domain_id;
+
+	if (!dev_is_pci(dev) || !dev_is_keepalive(dev) ||
+	    info->iommu != ctx->iommu)
+		return 0;
+	pdev = to_pci_dev(dev);
+	if (pci_is_bridge(pdev))
+		return 0;
+	domain_id = info->domain->iommu_did[ctx->iommu->seq_id];
+	set_bit(domain_id, ctx->domain_ids);
+
+	return 0;
+}
+
+static int iommu_get_keepalive_domain_ids(struct intel_iommu *iommu,
+					  unsigned long *domain_ids)
+{
+	struct did_ctx ctx;
+
+	ctx.iommu = iommu;
+	ctx.domain_ids = domain_ids;
+	return for_each_device_domain(iommu_set_domain_id_bit, &ctx);
+}
+
 static int intel_iommu_pkram_save_state(struct pkram_stream *ps,
 					struct intel_iommu *iommu)
 {
@@ -6347,6 +6381,17 @@ static int intel_iommu_pkram_save_state(struct pkram_stream *ps,
 	ret = pkram_save_chunk(ps, &state, sizeof(state));
 	if (ret)
 		return ret;
+
+	domain_ids = kzalloc(state.domain_ids_size, GFP_KERNEL);
+	if (!domain_ids)
+		return -ENOMEM;
+	ret = iommu_get_keepalive_domain_ids(iommu, domain_ids);
+	if (ret)
+		return ret;
+	ret = pkram_save_chunk(ps, domain_ids, state.domain_ids_size);
+	if (ret)
+		return ret;
+	kfree(domain_ids);
 
 	ret = pkram_save_page(ps, virt_to_page(iommu->root_entry), 0);
 	if (ret)
