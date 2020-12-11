@@ -6350,3 +6350,10 @@ static int __init intel_iommu_save_init(void)
 	return 0;
 }
 device_initcall(intel_iommu_save_init);
+
+static int __init intel_iommu_load_init(void)
+{
+	return 0;
+}
+fs_initcall(intel_iommu_load_init);
+
