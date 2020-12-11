@@ -6388,6 +6388,23 @@ static struct devinfo_iommu *__find_devinfo_iommu(int seq_id)
 	return NULL;
 }
 
+static int
+iommu_walk_keepalive_devinfo(struct devinfo_iommu *devinfo_iommu,
+			     int (*fn)(struct keepalive_devinfo *info,
+				       void *data),
+			     void *data)
+{
+	struct keepalive_devinfo *devinfo;
+	int ret;
+
+	list_for_each_entry(devinfo, &devinfo_iommu->devinfo_list, iommu_list) {
+		ret = fn(devinfo, data);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
 static int insert_devinfo_iommu_list(struct keepalive_devinfo *devinfo)
 {
 	struct devinfo_iommu *di;
@@ -6671,6 +6688,207 @@ fail_free_list:
 	return ret;
 }
 
+struct iter_ctx {
+	struct pkram_stream *ps;
+	struct root_entry *root;
+	int agaw;
+	u8 next_bus;
+	u8 next_devfn;
+	bool bus_context_done;
+	u64 *pgd_cache;
+	int pgd_cnt;
+	int pgd_size;
+};
+
+static int intel_iommu_pkram_save_pte(struct pkram_stream *ps, struct dma_pte *pte, int level)
+{
+	struct dma_pte *child;
+	int ret;
+
+	if (!pte)
+		return 0;
+
+	ret = pkram_save_page(ps, virt_to_page(pte), 0);
+	if (ret)
+		return ret;
+	level--;
+
+	if (level) {
+		int i;
+		for (i = 0; i < BIT_ULL(VTD_STRIDE_SHIFT); i++) {
+			if (!dma_pte_present(pte + i) || dma_pte_superpage(pte + i))
+				continue;
+			child = phys_to_virt(dma_pte_addr(pte + i));
+			ret = intel_iommu_pkram_save_pte(ps, child, level);
+			if (ret)
+				return ret;
+		}
+	}
+	return 0;
+}
+
+static int save_context_table_cb(struct keepalive_devinfo *devinfo, void *data)
+{
+	struct context_entry *context;
+	struct iter_ctx *ctx = data;
+	unsigned long pgd;
+	u8 bus, devfn;
+	int i, ret;
+
+	bus = devinfo->bus;
+	devfn = devinfo->devfn;
+
+	/* check buses lower than bus */
+	if (ctx->next_bus < bus) {
+		ctx->next_bus = bus;
+		ctx->next_devfn = 0;
+		ctx->bus_context_done = false;
+	}
+
+	/* entries until devfn in the same bus should be non-present */
+	context = phys_to_virt(ctx->root[ctx->next_bus].lo & VTD_PAGE_MASK);
+	BUG_ON(!context);
+	BUG_ON(ctx->next_devfn > devfn);
+	if (ctx->next_devfn < devfn)
+		ctx->next_devfn = devfn;
+
+	/* ctx->next_bus == bus, save context table first */
+	if (!ctx->bus_context_done) {
+		ret = pkram_save_page(ctx->ps, virt_to_page(context), 0);
+		if (ret)
+			return ret;
+		ctx->bus_context_done = true;
+	}
+
+	/* ctx->next_devfn == devfn in the same bus */
+	if (!(context[ctx->next_devfn].lo & 0x1)) {
+		pr_warn("%s: ctx->next_devfn %x entry not exists\n", __func__, ctx->next_devfn);
+		return -ENOENT;
+	}
+
+	pgd = context[ctx->next_devfn].lo & VTD_PAGE_MASK;
+
+	/* does this page table saved already? */
+	for (i = 0; i < ctx->pgd_cnt; i++) {
+		if (pgd == ctx->pgd_cache[i]) {
+			goto out_next_devfn;
+		}
+	}
+
+	/* save the page table */
+	ret = intel_iommu_pkram_save_pte(ctx->ps, phys_to_virt(pgd),
+					 agaw_to_level(ctx->agaw));
+	if (ret)
+		return ret;
+
+	/* record in cache */
+	if (ctx->pgd_cnt == ctx->pgd_size) {
+		int size = ctx->pgd_size << 1;
+		ctx->pgd_cache = krealloc(ctx->pgd_cache, size * sizeof(u64), GFP_KERNEL);
+		if (!ctx->pgd_cache)
+			return -ENOMEM;
+		ctx->pgd_size = size;
+	}
+	ctx->pgd_cache[ctx->pgd_cnt] = pgd;
+	ctx->pgd_cnt++;
+
+out_next_devfn:
+	ctx->next_devfn++;
+	if (ctx->next_devfn == 0) {
+		ctx->next_bus++;
+		ctx->bus_context_done = false;
+	}
+
+	return 0;
+}
+
+static int intel_iommu_pkram_save_root_table(struct intel_iommu *iommu)
+{
+	struct devinfo_iommu *di;
+	char root_table_name[64];
+	struct pkram_stream ps;
+	struct iter_ctx ctx;
+	int ret;
+
+	if (!iommu->root_entry)
+		return -ENOENT;
+
+	mutex_lock(&keepalive_devinfo_lock);
+
+	di = __find_devinfo_iommu(iommu->seq_id);
+	if (!di) {
+		ret = -ENOENT;
+		goto fail_unlock;
+	}
+
+	sprintf(root_table_name, "intel-iommu-root-table-dmar%d",
+		iommu->seq_id);
+	ret = pkram_prepare_save(&ps, root_table_name, GFP_KERNEL);
+	if (ret)
+		goto fail_unlock;
+
+	ret = pkram_prepare_save_obj(&ps);
+	if (ret)
+		goto fail_pkram_save;
+
+	ret = pkram_save_page(&ps, virt_to_page(iommu->root_entry), 0);
+	if (ret)
+		goto fail_pkram_save;
+
+	ctx.ps = &ps;
+	ctx.root = iommu->root_entry;
+	ctx.agaw = iommu->agaw;
+	ctx.next_bus = 0;
+	ctx.next_devfn = 0;
+	ctx.bus_context_done = false;
+	ctx.pgd_cnt = 0;
+	ctx.pgd_size = 512;
+	ctx.pgd_cache = kmalloc(sizeof(u64) * ctx.pgd_size, GFP_KERNEL);
+	if (!ctx.pgd_cache) {
+		ret = -ENOMEM;
+		goto fail_pkram_save;
+	}
+
+	ret = iommu_walk_keepalive_devinfo(di, save_context_table_cb, &ctx);
+	if (ret)
+		goto fail_free_pgd_cache;
+
+	pkram_finish_save_obj(&ps);
+	pkram_finish_save(&ps);
+	kfree(ctx.pgd_cache);
+	mutex_unlock(&keepalive_devinfo_lock);
+	return 0;
+fail_free_pgd_cache:
+	kfree(ctx.pgd_cache);
+fail_pkram_save:
+	pkram_discard_save(&ps);
+fail_unlock:
+	mutex_unlock(&keepalive_devinfo_lock);
+	return ret;
+}
+
+static int save_iommu_root_table(void)
+{
+	struct dmar_drhd_unit *drhd;
+	struct intel_iommu *iommu;
+	int ret;
+
+	down_write(&dmar_global_lock);
+	for_each_iommu(iommu, drhd) {
+		if (drhd->ignored)
+			continue;
+		if (!iommu->keepalive)
+			continue;
+		ret = intel_iommu_pkram_save_root_table(iommu);
+		if (ret) {
+			up_write(&dmar_global_lock);
+			return ret;
+		}
+	}
+	up_write(&dmar_global_lock);
+	return 0;
+}
+
 struct did_ctx {
 	struct intel_iommu *iommu;
 	unsigned long *domain_ids;
@@ -6892,6 +7110,10 @@ static int save_intel_iommu(void)
 
 	if (save_keepalive_devinfo()) {
 		pr_warn("failed to save intel iommu keepalive devinfo.\n");
+	}
+
+	if (save_iommu_root_table()) {
+		pr_warn("failed to save intel iommu root table \n");
 	}
 
 	return 0;
