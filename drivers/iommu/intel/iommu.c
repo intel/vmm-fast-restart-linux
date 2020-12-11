@@ -42,6 +42,7 @@
 #include <linux/crash_dump.h>
 #include <linux/numa.h>
 #include <linux/swiotlb.h>
+#include <linux/pkram.h>
 #include <linux/reboot.h>
 #include <asm/irq_remapping.h>
 #include <asm/cacheflush.h>
@@ -6327,8 +6328,87 @@ static void __init check_tylersburg_isoch(void)
 	pr_warn("Recommended TLB entries for ISOCH unit is 16; your BIOS set %d\n",
 	       vtisochctrl);
 }
+static int intel_iommu_pkram_save_state(struct pkram_stream *ps,
+					struct intel_iommu *iommu)
+{
+	struct intel_iommu_state state;
+	unsigned long *domain_ids;
+	void *base;
+	int i, ret;
+
+	state.reg_phys = iommu->reg_phys;
+	state.seq_id = iommu->seq_id;
+	state.segment = iommu->segment;
+	state.agaw = iommu->agaw;
+	state.qi_free_head = iommu->qi->free_head;
+	state.qi_free_tail = iommu->qi->free_tail;
+	state.qi_free_cnt = iommu->qi->free_cnt;
+	state.domain_ids_size = BITS_TO_LONGS(cap_ndoms(iommu->cap)) * sizeof(unsigned long);
+	ret = pkram_save_chunk(ps, &state, sizeof(state));
+	if (ret)
+		return ret;
+
+	ret = pkram_save_page(ps, virt_to_page(iommu->root_entry), 0);
+	if (ret)
+		return ret;
+
+	ret = pkram_save_page(ps, virt_to_page(iommu->qi->desc), 0);
+	if (ret)
+		return ret;
+
+	ret = pkram_save_page(ps, virt_to_page(iommu->qi->desc_status), 0);
+	if (ret)
+		return ret;
+
+	base = iommu->ir_table->base;
+	for (i = 0; i < (1 << INTR_REMAP_PAGE_ORDER); i++) {
+		ret = pkram_save_page(ps, virt_to_page(base + PAGE_SIZE * i), 0);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+int intel_iommu_pkram_save(void)
+{
+	struct dmar_drhd_unit *drhd;
+	struct intel_iommu *iommu;
+	struct pkram_stream ps;
+	int ret;
+
+	ret = pkram_prepare_save(&ps, "intel-iommu", GFP_KERNEL);
+	if (ret)
+		return ret;
+
+	down_write(&dmar_global_lock);
+	for_each_iommu(iommu, drhd) {
+		if (!iommu->keepalive)
+			continue;
+		pkram_prepare_save_obj(&ps);
+		ret = intel_iommu_pkram_save_state(&ps, iommu);
+		if (ret) {
+			pkram_finish_save_obj(&ps);
+			up_write(&dmar_global_lock);
+			goto fail_pkram_save;
+		}
+		pkram_finish_save_obj(&ps);
+	}
+	up_write(&dmar_global_lock);
+
+	pkram_finish_save(&ps);
+	return 0;
+fail_pkram_save:
+	pkram_discard_save(&ps);
+	return ret;
+}
+
 static int save_intel_iommu(void)
 {
+	if (intel_iommu_pkram_save()) {
+		pr_warn("failed to save intel iommu state \n");
+	}
+
 	return 0;
 }
 
