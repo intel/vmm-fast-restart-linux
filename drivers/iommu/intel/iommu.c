@@ -6727,6 +6727,34 @@ static int intel_iommu_pkram_save_pte(struct pkram_stream *ps, struct dma_pte *p
 	return 0;
 }
 
+static int intel_iommu_pkram_load_pte(struct pkram_stream *ps, struct dma_pte *pte, int level)
+{
+	struct page *page;
+	struct dma_pte *child;
+	int ret;
+
+	if (!pte)
+		return 0;
+
+	page = pkram_load_page(ps, NULL, NULL);
+	if (!page)
+		return -ENOENT;
+	level--;
+
+	if (level) {
+		int i;
+		for (i = 0; i < BIT_ULL(VTD_STRIDE_SHIFT); i++) {
+			if (!dma_pte_present(pte + i) || dma_pte_superpage(pte + i))
+				continue;
+			child = phys_to_virt(dma_pte_addr(pte + i));
+			ret = intel_iommu_pkram_load_pte(ps, child, level);
+			if (ret)
+				return ret;
+		}
+	}
+	return 0;
+}
+
 static int save_context_table_cb(struct keepalive_devinfo *devinfo, void *data)
 {
 	struct context_entry *context;
@@ -6785,6 +6813,118 @@ static int save_context_table_cb(struct keepalive_devinfo *devinfo, void *data)
 	if (ctx->pgd_cnt == ctx->pgd_size) {
 		int size = ctx->pgd_size << 1;
 		ctx->pgd_cache = krealloc(ctx->pgd_cache, size * sizeof(u64), GFP_KERNEL);
+		if (!ctx->pgd_cache)
+			return -ENOMEM;
+		ctx->pgd_size = size;
+	}
+	ctx->pgd_cache[ctx->pgd_cnt] = pgd;
+	ctx->pgd_cnt++;
+
+out_next_devfn:
+	ctx->next_devfn++;
+	if (ctx->next_devfn == 0) {
+		ctx->next_bus++;
+		ctx->bus_context_done = false;
+	}
+
+	return 0;
+}
+
+static void clear_until_bus_devfn(struct iter_ctx *ctx, u8 bus, u8 devfn)
+{
+	struct context_entry *context;
+
+	/*
+	 * We need to use "zero" as the final bdf delimiter to clear the
+	 * entries whose bdf seats after all keepalive devices.
+	 *
+	 * BDFs in keepalive devinfo list are sorted, so we can use "not equal".
+	 */
+	if (ctx->next_bus != bus) {
+		context = phys_to_virt(ctx->root[ctx->next_bus].lo &
+				       VTD_PAGE_MASK);
+		if (ctx->next_devfn) {
+			while (ctx->next_devfn) {
+				context[ctx->next_devfn].lo = 0;
+				context[ctx->next_devfn].hi = 0;
+				ctx->next_devfn++;
+			}
+			ctx->next_bus++;
+		}
+
+		while (ctx->next_bus != bus) {
+			ctx->root[ctx->next_bus].lo = 0;
+			ctx->root[ctx->next_bus].hi = 0;
+			ctx->next_bus++;
+		}
+
+		ctx->next_devfn = 0;
+		ctx->bus_context_done = false;
+	}
+
+	/* entries until devfn in the same bus should be non-present */
+	context = phys_to_virt(ctx->root[ctx->next_bus].lo & VTD_PAGE_MASK);
+	BUG_ON(!context);
+	BUG_ON(ctx->next_devfn > devfn);
+	while (ctx->next_devfn != devfn) {
+		context[ctx->next_devfn].lo = 0;
+		context[ctx->next_devfn].hi = 0;
+		ctx->next_devfn++;
+	}
+}
+
+static int load_context_table_cb(struct keepalive_devinfo *devinfo, void *data)
+{
+	struct context_entry *context;
+	struct iter_ctx *ctx = data;
+	struct page *page;
+	unsigned long pgd;
+	u8 bus, devfn;
+	int i, ret;
+
+	bus = devinfo->bus;
+	devfn = devinfo->devfn;
+
+	clear_until_bus_devfn(ctx, bus, devfn);
+
+	context = phys_to_virt(ctx->root[ctx->next_bus].lo &
+			       VTD_PAGE_MASK);
+	if (!context)
+		return -ENOENT;
+
+	/* ctx->next_bus == bus, load context table first */
+	if (!ctx->bus_context_done) {
+		page = pkram_load_page(ctx->ps, NULL, NULL);
+		if (!page)
+			return -ENOENT;
+		ctx->bus_context_done = true;
+	}
+
+	/* ctx->next_devfn == devfn in the same bus */
+	if (!(context[ctx->next_devfn].lo & 0x1))
+		return -ENOENT;
+
+	/* does this page table loaded already? */
+	pgd = context[ctx->next_devfn].lo & VTD_PAGE_MASK;
+
+	for (i = 0; i < ctx->pgd_cnt; i++) {
+		if (pgd == ctx->pgd_cache[i]) {
+			pr_info("%s: pgd %lx already loaded\n", __func__, pgd);
+			goto out_next_devfn;
+		}
+	}
+
+	/* load the page table */
+	ret = intel_iommu_pkram_load_pte(ctx->ps, phys_to_virt(pgd),
+					 agaw_to_level(ctx->agaw));
+	if (ret)
+		return ret;
+
+	/* record in cache */
+	if (ctx->pgd_cnt == ctx->pgd_size) {
+		int size = ctx->pgd_size << 1;
+		ctx->pgd_cache = krealloc(ctx->pgd_cache, size * sizeof(u64),
+					  GFP_KERNEL);
 		if (!ctx->pgd_cache)
 			return -ENOMEM;
 		ctx->pgd_size = size;
@@ -6867,6 +7007,72 @@ fail_unlock:
 	return ret;
 }
 
+static int intel_iommu_pkram_load_root_table(struct intel_iommu *iommu)
+{
+	struct devinfo_iommu *di;
+	char root_table_name[64];
+	struct pkram_stream ps;
+	struct iter_ctx ctx;
+	struct page *page;
+	int ret;
+
+	mutex_lock(&keepalive_devinfo_lock);
+
+	di = __find_devinfo_iommu(iommu->seq_id);
+	if (!di) {
+		ret = -ENOENT;
+		goto fail_unlock;
+	}
+
+	sprintf(root_table_name, "intel-iommu-root-table-dmar%d",
+		iommu->seq_id);
+	ret = pkram_prepare_load(&ps, root_table_name);
+	if (ret)
+		goto fail_unlock;
+
+	ret = pkram_prepare_load_obj(&ps);
+	if (ret)
+		goto fail_pkram_load;
+
+	page = pkram_load_page(&ps, NULL, NULL);
+	if (!page)
+		goto fail_pkram_load;
+	iommu->root_entry = page_to_virt(page);
+
+	ctx.ps = &ps;
+	ctx.root = iommu->root_entry;
+	ctx.agaw = iommu->agaw;
+	ctx.next_bus = 0;
+	ctx.next_devfn = 0;
+	ctx.bus_context_done = false;
+	ctx.pgd_cnt = 0;
+	ctx.pgd_size = 512;
+	ctx.pgd_cache = kmalloc(sizeof(u64) * ctx.pgd_size, GFP_KERNEL);
+	if (!ctx.pgd_cache) {
+		ret = -ENOMEM;
+		goto fail_pkram_load;
+	}
+
+	ret = iommu_walk_keepalive_devinfo(di, load_context_table_cb, &ctx);
+	if (ret)
+		goto fail_free_pgd_cache;
+
+	clear_until_bus_devfn(&ctx, 0, 0);
+
+	pkram_finish_load_obj(&ps);
+	pkram_finish_load(&ps);
+	kfree(ctx.pgd_cache);
+	mutex_unlock(&keepalive_devinfo_lock);
+	return 0;
+fail_free_pgd_cache:
+	kfree(ctx.pgd_cache);
+fail_pkram_load:
+	pkram_finish_load(&ps);
+fail_unlock:
+	mutex_unlock(&keepalive_devinfo_lock);
+	return ret;
+}
+
 static int save_iommu_root_table(void)
 {
 	struct dmar_drhd_unit *drhd;
@@ -6880,6 +7086,28 @@ static int save_iommu_root_table(void)
 		if (!iommu->keepalive)
 			continue;
 		ret = intel_iommu_pkram_save_root_table(iommu);
+		if (ret) {
+			up_write(&dmar_global_lock);
+			return ret;
+		}
+	}
+	up_write(&dmar_global_lock);
+	return 0;
+}
+
+static int load_iommu_root_table(void)
+{
+	struct dmar_drhd_unit *drhd;
+	struct intel_iommu *iommu;
+	int ret;
+
+	down_write(&dmar_global_lock);
+	for_each_iommu(iommu, drhd) {
+		if (drhd->ignored)
+			continue;
+		if (!iommu->keepalive)
+			continue;
+		ret = intel_iommu_pkram_load_root_table(iommu);
 		if (ret) {
 			up_write(&dmar_global_lock);
 			return ret;
@@ -7141,6 +7369,8 @@ device_initcall(intel_iommu_save_init);
 static int __init intel_iommu_load_init(void)
 {
 	load_keepalive_devinfo();
+	load_iommu_root_table();
+
 	return 0;
 }
 fs_initcall(intel_iommu_load_init);
