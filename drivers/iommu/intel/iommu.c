@@ -259,11 +259,23 @@ static inline void context_set_translation_type(struct context_entry *context,
 	context->lo |= (value & 3) << 2;
 }
 
+static inline
+unsigned int context_translation_type(struct context_entry *context)
+{
+	return (context->lo >> 2) & 3;
+}
+
 static inline void context_set_address_root(struct context_entry *context,
 					    unsigned long value)
 {
 	context->lo &= ~VTD_PAGE_MASK;
 	context->lo |= value & VTD_PAGE_MASK;
+}
+
+static inline
+unsigned long context_address_root(struct context_entry *context)
+{
+	return context->lo & VTD_PAGE_MASK;
 }
 
 static inline void context_set_address_width(struct context_entry *context,
@@ -2684,6 +2696,167 @@ struct keepalive_devinfo {
 	u8 devfn;
 };
 
+static struct devinfo_domain *__find_devinfo_domain(u32 segment, u8 bus, u8 devfn)
+{
+	struct keepalive_devinfo *devinfo;
+	struct devinfo_domain *dd;
+
+	list_for_each_entry(dd, &devinfo_domain_list, list) {
+		list_for_each_entry(devinfo, &dd->devinfo_list, domain_list) {
+			if (devinfo->segment == segment &&
+			    devinfo->bus == bus &&
+			    devinfo->devfn == devfn)
+				return dd;
+		}
+	}
+	return NULL;
+}
+
+static int intel_iommu_restore_domain(struct device *dev,
+			       struct iommu_domain **domain)
+{
+	struct dmar_domain *dmar_domain;
+	struct intel_iommu *iommu;
+	struct iommu_domain *d;
+	struct context_entry *context;
+	struct pci_dev *pdev;
+	u16 domain_id;
+	u8 bus, devfn;
+	int ret;
+
+	if (!dev_is_keepalive(dev) || !dev_is_pci(dev)) {
+		if (domain)
+			*domain = NULL;
+		return 0;
+	}
+
+	pdev = to_pci_dev(dev);
+	if (pci_is_bridge(pdev)) {
+		if (domain)
+			*domain = NULL;
+		return 0;
+	}
+
+	dmar_domain = find_domain(dev);
+	if (dmar_domain) {
+		if (domain)
+			*domain = &dmar_domain->domain;
+		return 0;
+	}
+
+	iommu = device_to_iommu(dev, &bus, &devfn);
+	if (!iommu)
+		return -ENOENT;
+
+	context = iommu_context_addr(iommu, bus, devfn, 0);
+	if (!context || !context_present(context)) {
+		pci_warn(pdev, "keepalive device has not present iommu context\n");
+		return -ENOENT;
+	}
+	domain_id = context_domain_id(context);
+
+	dmar_domain = get_iommu_domain(iommu, domain_id);
+	if (dmar_domain) {
+		d = &dmar_domain->domain;
+	} else {
+		struct devinfo_domain *dd;
+		mutex_lock(&keepalive_devinfo_lock);
+		dd = __find_devinfo_domain(iommu->segment, bus, devfn);
+		if (!dd) {
+			mutex_unlock(&keepalive_devinfo_lock);
+			return -ENOENT;
+		}
+		if (dd->domain) {
+			d = &dd->domain->domain;
+		} else {
+			d = iommu_domain_alloc(dev->bus);
+			if (!d) {
+				mutex_unlock(&keepalive_devinfo_lock);
+				return -ENOMEM;
+			}
+			dd->domain = to_dmar_domain(d);
+		}
+		mutex_unlock(&keepalive_devinfo_lock);
+	}
+
+	ret = intel_iommu_attach_device(d, dev);
+	if (ret) {
+		iommu_domain_free(d);
+		return ret;
+	}
+
+	if (domain)
+		*domain = d;
+
+	return 0;
+}
+
+static int domain_keepalive_reattach_iommu(struct dmar_domain *domain,
+					   struct intel_iommu *iommu,
+					   struct device_domain_info *info)
+{
+	struct context_entry *context;
+	unsigned int translation;
+	struct dma_pte *pgd;
+	u16 domain_id;
+
+	assert_spin_locked(&device_domain_lock);
+	assert_spin_locked(&iommu->lock);
+
+	context = iommu_context_addr(iommu, info->bus, info->devfn, 0);
+	if (!context || !context_present(context)) {
+		pci_warn(to_pci_dev(info->dev), "context present bit is not set\n");
+		return -ENODEV;
+	}
+
+	domain_id = context_domain_id(context);
+	pgd = phys_to_virt(context_address_root(context));
+
+	translation = context_translation_type(context);
+	if ((translation == CONTEXT_TT_PASS_THROUGH) ||
+	    (info->ats_supported && translation != CONTEXT_TT_DEV_IOTLB) ||
+	    (!info->ats_supported && translation != CONTEXT_TT_MULTI_LEVEL)) {
+		pci_warn(to_pci_dev(info->dev), "unmatched xlation type %u, ats_support %u\n",
+			translation, (unsigned int)info->ats_supported);
+		return -EINVAL;
+	}
+
+	if (domain->pgd != pgd) {
+		if (!list_empty(&domain->devices)) {
+			domain_id = domain->iommu_did[iommu->seq_id];
+			pci_warn(to_pci_dev(info->dev), "domain (id %d) has other devices attached\n", domain_id);
+			return -EBUSY;
+		}
+		free_pgtable_page(domain->pgd);
+		domain->pgd = pgd;
+		domain_flush_cache(domain, domain->pgd, PAGE_SIZE);
+	}
+
+	domain->iommu_refcnt[iommu->seq_id] += 1;
+	domain->iommu_count += 1;
+
+	domain->iommu_did[iommu->seq_id] = domain_id;
+	set_iommu_domain(iommu, domain_id, domain);
+	domain->nid = iommu->node;
+	domain_update_iommu_cap(domain);
+
+	return 0;
+}
+
+static bool need_keepalive_reattach(struct device *dev)
+{
+	struct pci_dev *pdev;
+
+	if (!dev_is_keepalive(dev))
+		return false;
+	if (!dev_is_pci(dev))
+		return false;
+	pdev = to_pci_dev(dev);
+	if (pci_is_bridge(pdev))
+		return false;
+	return true;
+}
+
 static struct dmar_domain *dmar_insert_one_dev_info(struct intel_iommu *iommu,
 						    int bus, int devfn,
 						    struct device *dev,
@@ -2763,7 +2936,10 @@ static struct dmar_domain *dmar_insert_one_dev_info(struct intel_iommu *iommu,
 	}
 
 	spin_lock(&iommu->lock);
-	ret = domain_attach_iommu(domain, iommu);
+	if (dev && need_keepalive_reattach(dev))
+		ret = domain_keepalive_reattach_iommu(domain, iommu, info);
+	else
+		ret = domain_attach_iommu(domain, iommu);
 	spin_unlock(&iommu->lock);
 
 	if (ret) {
@@ -6212,6 +6388,7 @@ const struct iommu_ops intel_iommu_ops = {
 	.dev_disable_feat	= intel_iommu_dev_disable_feat,
 	.is_attach_deferred	= intel_iommu_is_attach_deferred,
 	.def_domain_type	= device_def_domain_type,
+	.restore_domain		= intel_iommu_restore_domain,
 	.pgsize_bitmap		= INTEL_IOMMU_PGSIZES,
 #ifdef CONFIG_INTEL_IOMMU_SVM
 	.cache_invalidate	= intel_iommu_sva_invalidate,
