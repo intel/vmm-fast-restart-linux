@@ -7389,6 +7389,7 @@ static int save_intel_iommu(void)
 static int intel_iommu_save_callback(struct notifier_block *notifier,
 				  unsigned long val, void *v)
 {
+	mark_keepalive_iommu(true);
 	save_intel_iommu();
 	return NOTIFY_OK;
 }
@@ -7423,6 +7424,7 @@ static int __init intel_iommu_finish_keepalive_load(void)
 	 * keepalive_devinfo later than that
 	 */
 	free_keepalive_devinfo_list();
+	mark_keepalive_iommu(false);
 
 	return 0;
 }
