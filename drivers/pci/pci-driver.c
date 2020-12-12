@@ -265,10 +265,14 @@ static const struct pci_device_id *pci_match_device(struct pci_driver *drv,
 	list_for_each_entry(dynid, &drv->dynids.list, node) {
 		if (pci_match_one_device(&dynid->id, dev)) {
 			found_id = &dynid->id;
-			break;
+			spin_unlock(&drv->dynids.lock);
+			return found_id;
 		}
 	}
 	spin_unlock(&drv->dynids.lock);
+
+	if (pci_is_keepalive_dev(dev))
+		return NULL;
 
 	if (!found_id)
 		found_id = pci_match_id(drv->id_table, dev);
