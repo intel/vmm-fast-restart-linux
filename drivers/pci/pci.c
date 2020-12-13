@@ -6575,3 +6575,38 @@ static int __init pci_realloc_setup_params(void)
 	return 0;
 }
 pure_initcall(pci_realloc_setup_params);
+
+void pci_dev_set_keepalive(struct pci_dev *pdev)
+{
+	struct pci_bus *bus = pdev->bus;
+
+	while (bus && bus->self) {
+		dev_set_keepalive(&bus->self->dev);
+		bus = bus->parent;
+	}
+	dev_set_keepalive(&pdev->dev);
+}
+EXPORT_SYMBOL(pci_dev_set_keepalive);
+
+static void pci_try_clear_bridge_keepalive(struct pci_bus *bus)
+{
+	struct pci_dev *pdev;
+
+	list_for_each_entry(pdev, &bus->devices, bus_list) {
+		if (dev_is_keepalive(&pdev->dev))
+			return;
+	}
+	dev_clear_keepalive(&bus->self->dev);
+}
+
+void pci_dev_clear_keepalive(struct pci_dev *pdev)
+{
+	struct pci_bus *bus = pdev->bus;
+
+	dev_clear_keepalive(&pdev->dev);
+	while (bus && bus->self) {
+		pci_try_clear_bridge_keepalive(bus);
+		bus = bus->parent;
+	}
+}
+EXPORT_SYMBOL(pci_dev_clear_keepalive);
