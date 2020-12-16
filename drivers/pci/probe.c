@@ -2515,13 +2515,204 @@ void pci_device_add(struct pci_dev *dev, struct pci_bus *bus)
 	WARN_ON(ret < 0);
 }
 
+static void restore_keepalive_resource(struct pci_keepalive_state *state,
+				       struct pci_dev *dev, unsigned int howmany)
+{
+	int i;
+
+	for (i = 0; i < howmany; i++) {
+		dev->resource[i].start = state->resource[i].start;
+		dev->resource[i].end = state->resource[i].end;
+		dev->resource[i].flags = state->resource[i].flags;
+		dev->resource[i].desc = state->resource[i].desc;
+		dev->resource[i].name = pci_name(dev);
+	}
+}
+
+static struct pci_dev *
+pci_build_keepalive_dev(struct pci_bus *bus, struct pci_keepalive_state *state)
+{
+	struct pci_dev *dev;
+	int ret;
+	u32 l;
+	u32 class;
+	u8 hdr_type;
+
+	if (!pci_bus_read_dev_vendor_id(bus, state->devfn, &l, 60*1000))
+		return NULL;
+
+	dev = pci_alloc_dev(bus);
+	if (!dev)
+		return NULL;
+
+	dev->devfn = state->devfn;
+	dev->vendor = l & 0xffff;
+	dev->device = (l >> 16) & 0xffff;
+
+	pci_set_of_node(dev);
+
+	hdr_type = pci_hdr_type(dev);
+
+	dev->sysdata = dev->bus->sysdata;
+	dev->dev.parent = dev->bus->bridge;
+	dev->dev.bus = &pci_bus_type;
+	dev->hdr_type = hdr_type & 0x7f;
+	dev->multifunction = !!(hdr_type & 0x80);
+	dev->error_state = pci_channel_io_normal;
+	set_pcie_port_type(dev);
+
+	pci_dev_assign_slot(dev);
+
+	/*
+	 * Assume 32-bit PCI; let 64-bit PCI cards (which are far rarer)
+	 * set this higher, assuming the system even supports it.
+	 */
+	dev->dma_mask = 0xffffffff;
+
+	dev_set_name(&dev->dev, "%04x:%02x:%02x.%d", pci_domain_nr(dev->bus),
+		     dev->bus->number, PCI_SLOT(dev->devfn),
+		     PCI_FUNC(dev->devfn));
+
+	class = pci_class(dev);
+
+	dev->revision = class & 0xff;
+	dev->class = class >> 8;		    /* upper 3 bytes */
+
+	pci_info(dev, "build keepalive pci device [%04x:%04x] type %02x class %#08x\n",
+		   dev->vendor, dev->device, dev->hdr_type, dev->class);
+
+	if (pci_early_dump)
+		early_dump_pci_device(dev);
+
+	dev->cfg_size = state->cfg_size;
+	dev->is_thunderbolt = state->is_thunderbolt;
+	dev->untrusted = state->untrusted;
+	dev->current_state = state->current_state; // assumed to be PCI_D0;
+	dev->non_compliant_bars = state->non_compliant_bars;
+	dev->broken_intx_masking = state->broken_intx_masking;
+	dev->transparent = state->transparent;
+	dev->subsystem_vendor = state->subsystem_vendor;
+	dev->subsystem_device = state->subsystem_device;
+	dev->is_hotplug_bridge = state->is_hotplug_bridge;
+	dev->pin = state->pin;
+	dev->irq = state->irq;
+	dev->dma_mask = state->dma_mask;
+
+	dev->imm_ready = state->imm_ready;
+	dev->pm_cap = state->pm_cap;
+	dev->pme_support = state->pme_support;
+	dev->pme_poll = state->pme_poll;
+	dev->d1_support = state->d1_support;
+	dev->d2_support = state->d2_support;
+	dev->no_d1d2 = state->no_d1d2;
+	dev->no_d3cold = state->no_d3cold;
+	dev->bridge_d3 = state->bridge_d3;
+	dev->d3cold_allowed = state->d3cold_allowed;
+	dev->mmio_always_on = state->mmio_always_on;
+	dev->wakeup_prepared = state->wakeup_prepared;
+	dev->runtime_d3cold = state->runtime_d3cold;
+
+	dev->skip_bus_pm = state->skip_bus_pm;
+	dev->ignore_hotplug = state->ignore_hotplug;
+	dev->hotplug_user_indicators = state->hotplug_user_indicators;
+
+	dev->clear_retrain_link = state->clear_retrain_link;
+	dev->d3hot_delay = state->d3hot_delay;
+	dev->d3cold_delay = state->d3cold_delay;
+
+#ifdef CONFIG_HOTPLUG_PCI_PCIE
+	dev->broken_cmd_compl = state->broken_cmd_compl;
+#endif
+#ifdef CONFIG_PCIE_PTM
+	dev->ptm_root = state->ptm_root;
+	dev->ptm_enabled = state->ptm_enabled;
+	dev->ptm_granularity = state->ptm_granularity;
+#endif
+	dev->dev_flags = state->dev_flags;
+	dev->msi_cap = state->msi_cap;
+	dev->msix_cap = state->msix_cap;
+	dev->rom_base_reg = state->rom_base_reg;
+	dev->io_window = state->io_window;
+	dev->pref_window = state->pref_window;
+	dev->pref_64_window = state->pref_64_window;
+	dev->io_window_1k = state->io_window_1k;
+
+	dev->reset_fn = state->reset_fn;
+
+	if (dev->non_compliant_bars || dev->is_virtfn)
+		goto bypass_restore_resource;
+
+	restore_keepalive_resource(state, dev, PCI_NUM_RESOURCES);
+
+bypass_restore_resource:
+	device_initialize(&dev->dev);
+	dev->dev.release = pci_release_dev;
+
+	set_dev_node(&dev->dev, pcibus_to_node(bus));
+	dev->dev.dma_mask = &dev->dma_mask;
+	dev->dev.dma_parms = &dev->dma_parms;
+	dev->dev.coherent_dma_mask = 0xffffffffull;
+
+	dma_set_max_seg_size(&dev->dev, 65536);
+	dma_set_seg_boundary(&dev->dev, 0xffffffff);
+
+	dev->state_saved = false;
+
+	pci_ea_init(dev);		/* Enhanced Allocation */
+
+	/* Buffers for saving PCIe and PCI-X capabilities */
+	pci_allocate_cap_save_buffers(dev);
+
+	pci_pm_init(dev);		/* Power Management */
+	pci_vpd_init(dev);		/* Vital Product Data */
+	pci_iov_init(dev);		/* Single Root I/O Virtualization */
+	pci_ats_init(dev);		/* Address Translation Services */
+	pci_pri_init(dev);		/* Page Request Interface */
+	pci_pasid_init(dev);		/* Process Address Space ID */
+	pci_aer_init(dev);		/* Advanced Error Reporting */
+
+	/*
+	 * Add the device to our list of discovered devices
+	 * and the bus list for fixup functions, etc.
+	 */
+	down_write(&pci_bus_sem);
+	list_add_tail(&dev->bus_list, &bus->devices);
+	up_write(&pci_bus_sem);
+
+	ret = pcibios_add_device(dev);
+	WARN_ON(ret < 0);
+
+	/* Set up MSI IRQ domain */
+	pci_set_msi_domain(dev);
+
+	/* Notifier could use PCI capabilities */
+	dev->match_driver = false;
+	ret = device_add(&dev->dev);
+	WARN_ON(ret < 0);
+	return dev;
+}
+
 struct pci_dev *pci_scan_single_device(struct pci_bus *bus, int devfn)
 {
+	struct pci_keepalive_state *state;
 	struct pci_dev *dev;
 
 	dev = pci_get_slot(bus, devfn);
 	if (dev) {
 		pci_dev_put(dev);
+		return dev;
+	}
+
+	state = pci_find_keepalive_state(bus->number, devfn);
+	if (state) {
+		dev = pci_build_keepalive_dev(bus, state);
+		if (!dev) {
+			pr_warn("failed to restore pci states for bus 0x%x and devfn 0x%x\n",
+				bus->number, devfn);
+			return NULL;
+		}
+		dev_set_keepalive(&dev->dev);
+		atomic_inc_return(&dev->enable_cnt);
 		return dev;
 	}
 
