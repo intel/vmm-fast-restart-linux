@@ -98,6 +98,7 @@
 #include <linux/mem_encrypt.h>
 #include <linux/kcsan.h>
 #include <linux/init_syscalls.h>
+#include <linux/pkram.h>
 
 #include <asm/io.h>
 #include <asm/bugs.h>
@@ -1019,6 +1020,7 @@ asmlinkage __visible void __init __no_sanitize_address start_kernel(void)
 	setup_per_cpu_pageset();
 	numa_policy_init();
 	acpi_early_init();
+	pkram_init_sb();
 	if (late_time_init)
 		late_time_init();
 	sched_clock_init();
