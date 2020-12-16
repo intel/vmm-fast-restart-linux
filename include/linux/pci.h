@@ -2397,6 +2397,11 @@ static inline bool pci_is_thunderbolt_attached(struct pci_dev *pdev)
 void pci_uevent_ers(struct pci_dev *pdev, enum  pci_ers_result err_type);
 #endif
 
+static inline bool pci_is_keepalive_dev(struct pci_dev *pdev)
+{
+	return dev_is_keepalive(&pdev->dev) && !pci_is_bridge(pdev);
+}
+
 void pci_dev_set_keepalive(struct pci_dev *pdev);
 void pci_dev_clear_keepalive(struct pci_dev *pdev);
 
