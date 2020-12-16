@@ -189,7 +189,7 @@ static inline void pci_msi_set_enable(struct pci_dev *dev, int enable)
 {
 	u16 control;
 
-	if (dev_is_keepalive(&dev->dev))
+	if (pci_is_keepalive_dev(dev))
 		return;
 
 	pci_read_config_word(dev, dev->msi_cap + PCI_MSI_FLAGS, &control);
@@ -203,7 +203,7 @@ static inline void pci_msix_clear_and_set_ctrl(struct pci_dev *dev, u16 clear, u
 {
 	u16 ctrl;
 
-	if (dev_is_keepalive(&dev->dev))
+	if (pci_is_keepalive_dev(dev))
 		return;
 
 	pci_read_config_word(dev, dev->msix_cap + PCI_MSIX_FLAGS, &ctrl);

@@ -182,7 +182,7 @@ u32 __pci_msi_desc_mask_irq(struct msi_desc *desc, u32 mask, u32 flag)
 	mask_bits &= ~mask;
 	mask_bits |= flag;
 
-	if (dev_is_keepalive(&pdev->dev))
+	if (pci_is_keepalive_dev(pdev))
 		return mask_bits;
 
 	pci_write_config_dword(msi_desc_to_pci_dev(desc), desc->mask_pos,
@@ -229,7 +229,7 @@ u32 __pci_msix_desc_mask_irq(struct msi_desc *desc, u32 flag)
 	if (flag & PCI_MSIX_ENTRY_CTRL_MASKBIT)
 		mask_bits |= PCI_MSIX_ENTRY_CTRL_MASKBIT;
 
-	if (dev_is_keepalive(&dev->dev))
+	if (pci_is_keepalive_dev(dev))
 		return mask_bits;
 
 	writel(mask_bits, desc_addr + PCI_MSIX_ENTRY_VECTOR_CTRL);
@@ -322,7 +322,7 @@ void __pci_write_msi_msg(struct msi_desc *entry, struct msi_msg *msg)
 {
 	struct pci_dev *dev = msi_desc_to_pci_dev(entry);
 
-	if (dev_is_keepalive(&dev->dev))
+	if (pci_is_keepalive_dev(dev))
 		goto skip;
 
 	if (dev->current_state != PCI_D0 || pci_dev_is_disconnected(dev)) {
@@ -418,7 +418,7 @@ static void free_msi_irqs(struct pci_dev *dev)
 
 static void pci_intx_for_msi(struct pci_dev *dev, int enable)
 {
-	if (dev_is_keepalive(&dev->dev))
+	if (pci_is_keepalive_dev(dev))
 		return;
 
 	if (!(dev->dev_flags & PCI_DEV_FLAGS_MSI_INTX_DISABLE_BUG))
