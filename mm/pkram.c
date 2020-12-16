@@ -666,6 +666,12 @@ int pkram_prepare_save_obj(struct pkram_stream *ps)
 		obj->obj_pfn = node->obj_pfn;
 	node->obj_pfn = page_to_pfn(page);
 
+	/*
+	 * pkram_finish_save_obj will reset chunk_page
+	 * if pkram_save_chunk is done before.
+	 */
+	BUG_ON(ps->chunk_page != NULL);
+
 	pkram_stream_init_obj(ps, obj);
 	return 0;
 }
@@ -676,6 +682,11 @@ int pkram_prepare_save_obj(struct pkram_stream *ps)
 void pkram_finish_save_obj(struct pkram_stream *ps)
 {
 	struct pkram_node *node = ps->node;
+
+	if (ps->chunk_page) {
+		ps->chunk_page = NULL;
+		ps->chunk_offset = 0;
+	}
 
 	BUG_ON((node->flags & PKRAM_ACCMODE_MASK) != PKRAM_SAVE);
 }
@@ -689,6 +700,8 @@ void pkram_finish_save(struct pkram_stream *ps)
 	struct pkram_node *node = ps->node;
 
 	BUG_ON((node->flags & PKRAM_ACCMODE_MASK) != PKRAM_SAVE);
+
+	BUG_ON(ps->chunk_page != NULL);
 
 	smp_wmb();
 	node->flags &= ~PKRAM_ACCMODE_MASK;
@@ -704,6 +717,11 @@ void pkram_discard_save(struct pkram_stream *ps)
 	struct pkram_node *node = ps->node;
 
 	BUG_ON((node->flags & PKRAM_ACCMODE_MASK) != PKRAM_SAVE);
+
+	if (ps->chunk_page) {
+		ps->chunk_page = NULL;
+		ps->chunk_offset = 0;
+	}
 
 	mutex_lock(&pkram_mutex);
 	pkram_delete_node(node);
@@ -779,6 +797,8 @@ int pkram_prepare_load_obj(struct pkram_stream *ps)
 	obj = pfn_to_kaddr(node->obj_pfn);
 	node->obj_pfn = obj->obj_pfn;
 
+	BUG_ON(ps->chunk_page != NULL);
+
 	pkram_stream_init_obj(ps, obj);
 	return 0;
 }
@@ -816,6 +836,12 @@ void pkram_finish_load_obj(struct pkram_stream *ps)
 	if (ps->data_page)
 		pkram_free_page(page_address(ps->data_page));
 
+	if (ps->chunk_page) {
+		pkram_free_page(page_address(ps->chunk_page));
+		ps->chunk_page = NULL;
+		ps->chunk_offset = 0;
+	}
+
 	pkram_truncate_obj(obj);
 	pkram_free_page(obj);
 }
@@ -833,6 +859,8 @@ void pkram_finish_load(struct pkram_stream *ps)
 
 	if (ps->data_page)
 		put_page(ps->data_page);
+
+	BUG_ON(ps->chunk_page != NULL);
 
 	pkram_truncate_node(node);
 	pkram_free_page(node);
@@ -931,6 +959,11 @@ int pkram_save_page(struct pkram_stream *ps, struct page *page, short flags)
 
 	BUG_ON((node->flags & PKRAM_ACCMODE_MASK) != PKRAM_SAVE);
 
+	if (ps->chunk_page) {
+		ps->chunk_page = NULL;
+		ps->chunk_offset = 0;
+	}
+
 	/* if page is banned, relocate it */
 	if (pkram_page_banned(page))
 		return __pkram_save_page_copy(ps, page, flags);
@@ -1025,6 +1058,12 @@ struct page *pkram_load_page(struct pkram_stream *ps, unsigned long *index, shor
 	struct pkram_node *node = ps->node;
 
 	BUG_ON((node->flags & PKRAM_ACCMODE_MASK) != PKRAM_LOAD);
+
+	if (ps->chunk_page) {
+		pkram_free_page(page_address(ps->chunk_page));
+		ps->chunk_page = NULL;
+		ps->chunk_offset = 0;
+	}
 
 	return __pkram_load_page(ps, index, flags);
 }
@@ -1125,6 +1164,84 @@ size_t pkram_read(struct pkram_stream *ps, void *buf, size_t count)
 	}
 
 	return copy_count;
+}
+
+int pkram_save_chunk(struct pkram_stream *ps, const void *buf, size_t size)
+{
+	struct page *page;
+	void *page_buf;
+	int ret;
+
+	if (!size)
+		return 0;
+
+	while (size) {
+		size_t sz, remain;
+
+		if (!ps->chunk_page) {
+			page = alloc_page(GFP_KERNEL);
+			if (!page)
+				return -ENOMEM;
+			ret = pkram_save_page(ps, page, 0);
+			if (ret != 0) {
+				__free_page(page);
+				return ret;
+			}
+			ps->chunk_page = page;
+			ps->chunk_offset = 0;
+		}
+
+		page_buf = page_address(ps->chunk_page) + ps->chunk_offset;
+		remain = PAGE_SIZE - ps->chunk_offset;
+		sz = size < remain ? size : remain;
+		memcpy(page_buf, buf, sz);
+		size -= sz;
+		buf += sz;
+		ps->chunk_offset += sz;
+
+		if (ps->chunk_offset == PAGE_SIZE) {
+			ps->chunk_page = NULL;
+			ps->chunk_offset = 0;
+		}
+	}
+	BUG_ON(size != 0);
+
+	return 0;
+}
+
+int pkram_load_chunk(struct pkram_stream *ps, void *buf, size_t size)
+{
+	struct page *page;
+	void *page_buf;
+
+	while (size) {
+		int sz, remain;
+
+		if (!ps->chunk_page) {
+			page = pkram_load_page(ps, NULL, NULL);
+			if (!page)
+				return -ENOENT;
+			ps->chunk_page = page;
+			ps->chunk_offset = 0;
+		}
+
+		page_buf = page_address(ps->chunk_page) + ps->chunk_offset;
+		remain = PAGE_SIZE - ps->chunk_offset;
+		sz = size < remain ? size : remain;
+		memcpy(buf, page_buf, sz);
+		size -= sz;
+		buf += sz;
+		ps->chunk_offset += sz;
+
+		if (ps->chunk_offset == PAGE_SIZE) {
+			__free_page(ps->chunk_page);
+			ps->chunk_page = NULL;
+			ps->chunk_offset = 0;
+		}
+	}
+	BUG_ON(size != 0);
+
+	return 0;
 }
 
 /*
@@ -1258,6 +1375,7 @@ static void pkram_free_pte_bitmap(void *bitmap)
 	free_page((unsigned long)bitmap);
 }
 
+#undef set_p4d
 #define set_p4d(p4dp, p4d)	WRITE_ONCE(*(p4dp), (p4d))
 
 static int pkram_add_identity_map(struct page *page)

@@ -18,6 +18,9 @@ struct pkram_stream {
 
 	unsigned long next_index;
 
+	struct page *chunk_page;
+	unsigned int chunk_offset;
+
 	/* byte data */
 	struct page *data_page;
 	unsigned int data_offset;
@@ -61,6 +64,9 @@ struct page *pkram_load_page(struct pkram_stream *ps, unsigned long *index,
 
 ssize_t pkram_write(struct pkram_stream *ps, const void *buf, size_t count);
 size_t pkram_read(struct pkram_stream *ps, void *buf, size_t count);
+
+int pkram_save_chunk(struct pkram_stream *ps, const void *buf, size_t size);
+int pkram_load_chunk(struct pkram_stream *ps, void *buf, size_t size);
 
 phys_addr_t pkram_memblock_find_in_range(phys_addr_t start, phys_addr_t end,
 					 phys_addr_t size, phys_addr_t align);
