@@ -1335,7 +1335,7 @@ static struct attribute_group pkram_attr_group = {
 };
 
 /* returns non-zero on success */
-static int __init pkram_init_sb(void)
+int __init pkram_init_sb(void)
 {
 	unsigned long pfn;
 	struct pkram_node *node;
@@ -1364,10 +1364,11 @@ static int __init pkram_init_sb(void)
 	}
 	return 1;
 }
+EXPORT_SYMBOL(pkram_init_sb);
 
 static int __init pkram_init(void)
 {
-	if (!is_kdump_kernel() && pkram_init_sb()) {
+	if (!is_kdump_kernel()) {
 		register_reboot_notifier(&pkram_reboot_notifier);
 		register_shrinker(&banned_pages_shrinker);
 		sysfs_update_group(kernel_kobj, &pkram_attr_group);

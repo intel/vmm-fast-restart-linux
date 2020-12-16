@@ -65,6 +65,7 @@ struct page *pkram_load_page(struct pkram_stream *ps, unsigned long *index,
 ssize_t pkram_write(struct pkram_stream *ps, const void *buf, size_t count);
 size_t pkram_read(struct pkram_stream *ps, void *buf, size_t count);
 
+int pkram_init_sb(void);
 int pkram_save_chunk(struct pkram_stream *ps, const void *buf, size_t size);
 int pkram_load_chunk(struct pkram_stream *ps, void *buf, size_t size);
 
