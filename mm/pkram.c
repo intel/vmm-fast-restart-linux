@@ -1484,7 +1484,6 @@ again:
 	}
 
 	index = pte_index(paddr);
-	BUG_ON(test_bit(index, bitmap));
 	set_bit(index, bitmap);
 	smp_mb__after_atomic();
 	if (bitmap_full(bitmap, PTRS_PER_PTE))
