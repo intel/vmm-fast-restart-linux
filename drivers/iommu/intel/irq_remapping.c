@@ -1423,7 +1423,7 @@ static void intel_free_irq_resources(struct irq_domain *domain,
 			data = irq_data->chip_data;
 			pdev = data->irq_2_dev.pdev;
 
-			if (pdev && dev_is_keepalive(&pdev->dev)) {
+			if (pdev && pci_is_keepalive_dev(pdev)) {
 				dev_dbg(&pdev->dev, "%s: detach virq %u\n",
 					__func__, virq + i);
 
@@ -1477,7 +1477,7 @@ static int intel_irq_remapping_alloc(struct irq_domain *domain,
 	if (info->type == X86_IRQ_ALLOC_TYPE_PCI_MSI ||
 	    info->type == X86_IRQ_ALLOC_TYPE_PCI_MSIX) {
 		pdev = msi_desc_to_pci_dev(info->desc);
-		if (pdev && dev_is_keepalive(&pdev->dev)) {
+		if (pdev && pci_is_keepalive_dev(pdev)) {
 			dev_dbg(&pdev->dev, "%s: reattach virq %d, nr_irqs %d\n",
 				__func__, virq, nr_irqs);
 			return reattach_irte(domain, virq, nr_irqs, info);
