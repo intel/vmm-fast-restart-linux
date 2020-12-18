@@ -267,10 +267,13 @@ int iommu_probe_device(struct device *dev)
 	iommu_alloc_default_domain(group, dev);
 
 	if (group->default_domain) {
-		ret = __iommu_attach_device(group->default_domain, dev);
-		if (ret) {
-			iommu_group_put(group);
-			goto err_release;
+		if (!group->domain) {
+			group->domain = group->default_domain;
+			ret = __iommu_attach_device(group->default_domain, dev);
+			if (ret) {
+				iommu_group_put(group);
+				goto err_release;
+			}
 		}
 	}
 
@@ -1490,8 +1493,6 @@ static int iommu_group_alloc_default_domain(struct bus_type *bus,
 		return -ENOMEM;
 
 	group->default_domain = dom;
-	if (!group->domain)
-		group->domain = dom;
 
 	if (!iommu_dma_strict) {
 		int attr = 1;
@@ -1844,8 +1845,11 @@ int bus_iommu_probe(struct bus_type *bus)
 
 		iommu_group_create_direct_mappings(group);
 
-		ret = __iommu_group_dma_attach(group);
 
+		if (!group->domain) {
+			group->domain = group->default_domain;
+			ret = __iommu_group_dma_attach(group);
+		}
 		mutex_unlock(&group->mutex);
 
 		if (ret)
