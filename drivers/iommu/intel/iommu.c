@@ -6609,6 +6609,68 @@ fail_free_list:
 	return ret;
 }
 
+static int iommu_load_keepalive_devinfo(struct pkram_stream *ps)
+{
+	struct keepalive_devinfo *devinfo;
+	struct devinfo_domain *dd;
+	int ret, i;
+
+	dd = kzalloc(sizeof(*dd), GFP_KERNEL);
+	if (!dd)
+		return -ENOMEM;
+	ret = pkram_load_chunk(ps, &dd->devinfo_cnt, sizeof(int));
+	if (ret)
+		goto fail_free_dd;
+	INIT_LIST_HEAD(&dd->devinfo_list);
+	for (i = 0; i < dd->devinfo_cnt; i++) {
+		devinfo = kmalloc(sizeof(*devinfo), GFP_KERNEL);
+		ret = pkram_load_chunk(ps, devinfo, sizeof(*devinfo));
+		if (ret)
+			goto fail_free_devinfo;
+		ret = insert_devinfo_iommu_list(devinfo);
+		if (ret)
+			goto fail_free_devinfo;
+		list_add(&devinfo->domain_list, &dd->devinfo_list);
+		pr_info("%s: dev %x:%x\n",
+			__func__, devinfo->bus, devinfo->devfn);
+	}
+	list_add(&dd->list, &devinfo_domain_list);
+
+	return 0;
+fail_free_devinfo:
+	kfree(devinfo);
+fail_free_dd:
+	kfree(dd);
+	pkram_finish_load(ps);
+	return ret;
+}
+
+static int load_keepalive_devinfo(void)
+{
+	struct pkram_stream ps;
+	int ret;
+
+	ret = pkram_prepare_load(&ps, "intel-iommu-keepalive-devinfo");
+	if (ret)
+		return ret;
+
+	mutex_lock(&keepalive_devinfo_lock);
+	while (pkram_prepare_load_obj(&ps) == 0) {
+		ret = iommu_load_keepalive_devinfo(&ps);
+		if (ret) {
+			mutex_unlock(&keepalive_devinfo_lock);
+			goto fail_free_list;
+		}
+		pkram_finish_load_obj(&ps);
+	}
+	mutex_unlock(&keepalive_devinfo_lock);
+	return 0;
+fail_free_list:
+	free_keepalive_devinfo_list();
+	pkram_finish_load(&ps);
+	return ret;
+}
+
 struct did_ctx {
 	struct intel_iommu *iommu;
 	unsigned long *domain_ids;
@@ -6856,6 +6918,7 @@ device_initcall(intel_iommu_save_init);
 
 static int __init intel_iommu_load_init(void)
 {
+	load_keepalive_devinfo();
 	return 0;
 }
 fs_initcall(intel_iommu_load_init);
