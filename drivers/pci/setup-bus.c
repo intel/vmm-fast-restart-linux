@@ -580,6 +580,9 @@ static void pci_setup_bridge_io(struct pci_dev *bridge)
 	u16 l;
 	u32 io_upper16;
 
+	if (dev_is_keepalive(&bridge->dev))
+		return;
+
 	io_mask = PCI_IO_RANGE_MASK;
 	if (bridge->io_window_1k)
 		io_mask = PCI_IO_1K_RANGE_MASK;
@@ -614,6 +617,9 @@ static void pci_setup_bridge_mmio(struct pci_dev *bridge)
 	struct pci_bus_region region;
 	u32 l;
 
+	if (dev_is_keepalive(&bridge->dev))
+		return;
+
 	/* Set up the top and bottom of the PCI Memory segment for this bus */
 	res = &bridge->resource[PCI_BRIDGE_MEM_WINDOW];
 	pcibios_resource_to_bus(bridge->bus, &region, res);
@@ -632,6 +638,9 @@ static void pci_setup_bridge_mmio_pref(struct pci_dev *bridge)
 	struct resource *res;
 	struct pci_bus_region region;
 	u32 l, bu, lu;
+
+	if (dev_is_keepalive(&bridge->dev))
+		return;
 
 	/*
 	 * Clear out the upper 32 bits of PREF limit.  If
@@ -668,6 +677,9 @@ static void __pci_setup_bridge(struct pci_bus *bus, unsigned long type)
 
 	pci_info(bridge, "PCI bridge to %pR\n",
 		 &bus->busn_res);
+
+	if (dev_is_keepalive(&bridge->dev))
+		return;
 
 	if (type & IORESOURCE_IO)
 		pci_setup_bridge_io(bridge);

@@ -1256,10 +1256,12 @@ static int pci_scan_bridge_extend(struct pci_bus *bus, struct pci_dev *dev,
 	 * bus errors in some architectures.
 	 */
 	pci_read_config_word(dev, PCI_BRIDGE_CONTROL, &bctl);
-	pci_write_config_word(dev, PCI_BRIDGE_CONTROL,
-			      bctl & ~PCI_BRIDGE_CTL_MASTER_ABORT);
+	if (!dev_is_keepalive(&dev->dev)) {
+		pci_write_config_word(dev, PCI_BRIDGE_CONTROL,
+					bctl & ~PCI_BRIDGE_CTL_MASTER_ABORT);
 
-	pci_enable_crs(dev);
+		pci_enable_crs(dev);
+	}
 
 	if ((secondary || subordinate) && !pcibios_assign_all_busses() &&
 	    !is_cardbus && !broken) {
@@ -1428,7 +1430,8 @@ static int pci_scan_bridge_extend(struct pci_bus *bus, struct pci_dev *dev,
 	}
 
 out:
-	pci_write_config_word(dev, PCI_BRIDGE_CONTROL, bctl);
+	if (!dev_is_keepalive(&dev->dev))
+		pci_write_config_word(dev, PCI_BRIDGE_CONTROL, bctl);
 
 	pm_runtime_put(&dev->dev);
 
