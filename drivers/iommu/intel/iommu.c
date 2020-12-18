@@ -2607,6 +2607,27 @@ static bool dev_is_real_dma_subdevice(struct device *dev)
 	       pci_real_dma_dev(to_pci_dev(dev)) != to_pci_dev(dev);
 }
 
+static LIST_HEAD(intel_iommu_state_list);
+static DEFINE_MUTEX(intel_iommu_state_lock);
+
+struct intel_iommu_state *
+find_intel_iommu_state(u32 segment, u64 reg_base_addr)
+{
+	struct intel_iommu_state *state;
+
+	mutex_lock(&intel_iommu_state_lock);
+	list_for_each_entry(state, &intel_iommu_state_list, list) {
+		if (state->segment == segment &&
+		    state->reg_phys == reg_base_addr) {
+			mutex_unlock(&intel_iommu_state_lock);
+			return state;
+		}
+	}
+	mutex_unlock(&intel_iommu_state_lock);
+
+	return NULL;
+}
+
 static struct dmar_domain *dmar_insert_one_dev_info(struct intel_iommu *iommu,
 						    int bus, int devfn,
 						    struct device *dev,
@@ -6414,9 +6435,6 @@ static int intel_iommu_pkram_save_state(struct pkram_stream *ps,
 
 	return 0;
 }
-
-static LIST_HEAD(intel_iommu_state_list);
-static DEFINE_MUTEX(intel_iommu_state_lock);
 
 static struct intel_iommu_state *
 intel_iommu_pkram_load_state(struct pkram_stream *ps)

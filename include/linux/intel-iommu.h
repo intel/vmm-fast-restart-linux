@@ -818,6 +818,7 @@ struct context_entry *iommu_context_addr(struct intel_iommu *iommu, u8 bus,
 					 u8 devfn, int alloc);
 
 int intel_iommu_pkram_load(void);
+struct intel_iommu_state *find_intel_iommu_state(u32 segment, u64 reg_base_addr);
 
 #ifdef CONFIG_INTEL_IOMMU
 extern int iommu_calculate_agaw(struct intel_iommu *iommu);
