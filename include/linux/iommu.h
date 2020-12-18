@@ -302,6 +302,8 @@ struct iommu_ops {
 
 	int (*def_domain_type)(struct device *dev);
 
+	int (*restore_domain)(struct device *dev, struct iommu_domain **domain);
+
 	unsigned long pgsize_bitmap;
 	struct module *owner;
 };
