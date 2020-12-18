@@ -14,6 +14,8 @@
 #include <linux/acpi.h>
 #include <linux/irqdomain.h>
 #include <linux/crash_dump.h>
+#include <linux/pkram.h>
+#include <linux/reboot.h>
 #include <asm/io_apic.h>
 #include <asm/apic.h>
 #include <asm/smp.h>
@@ -1346,6 +1348,63 @@ static void intel_irq_remapping_prepare_irte(struct intel_ir_data *data,
 
 static LIST_HEAD(intel_ir_data_list);
 static DEFINE_SPINLOCK(ir_data_lock);
+
+int intel_ir_pkram_save(void)
+{
+	struct intel_ir_data *state;
+	struct pkram_stream ps;
+	unsigned long cnt;
+	int ret;
+
+	ret = pkram_prepare_save(&ps, "intel_ir_data", GFP_KERNEL);
+	if (ret)
+		return ret;
+	pkram_prepare_save_obj(&ps);
+	spin_lock(&ir_data_lock);
+
+	cnt = 0;
+	list_for_each_entry(state, &intel_ir_data_list, list) {
+		cnt++;
+	}
+	ret = pkram_save_chunk(&ps, &cnt, sizeof(cnt));
+
+	list_for_each_entry(state, &intel_ir_data_list, list) {
+		ret = pkram_save_chunk(&ps, state, sizeof(*state));
+		if (ret) {
+			spin_unlock(&ir_data_lock);
+			pkram_finish_save_obj(&ps);
+			goto fail_pkram_save;
+		}
+	}
+
+	spin_unlock(&ir_data_lock);
+	pkram_finish_save_obj(&ps);
+	pkram_finish_save(&ps);
+	return 0;
+fail_pkram_save:
+	pkram_discard_save(&ps);
+	return ret;
+}
+
+static int intel_ir_save_callback(struct notifier_block *notifier,
+				  unsigned long val, void *v)
+{
+	if (intel_ir_pkram_save())
+		pr_warn("failed to save intel ir states\n");
+	return NOTIFY_OK;
+}
+
+static struct notifier_block intel_ir_save_notifier = {
+	.notifier_call = intel_ir_save_callback,
+	.priority = 1,
+};
+
+static int __init intel_ir_save_init(void)
+{
+	register_live_update_notifier(&intel_ir_save_notifier);
+	return 0;
+}
+device_initcall(intel_ir_save_init);
 
 static struct intel_ir_data *find_detached_irte(struct irq_alloc_info *info,
 						int sub_index)
