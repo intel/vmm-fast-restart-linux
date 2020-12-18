@@ -6415,6 +6415,74 @@ static int intel_iommu_pkram_save_state(struct pkram_stream *ps,
 	return 0;
 }
 
+static LIST_HEAD(intel_iommu_state_list);
+static DEFINE_MUTEX(intel_iommu_state_lock);
+
+static struct intel_iommu_state *
+intel_iommu_pkram_load_state(struct pkram_stream *ps)
+{
+	struct intel_iommu_state *state;
+	unsigned long *domain_ids;
+	struct page *page;
+	int i, ret;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	if (!state)
+		return NULL;
+	ret = pkram_load_chunk(ps, state, sizeof(*state));
+	if (ret)
+		goto fail_free_state;
+
+	domain_ids = kmalloc(state->domain_ids_size, GFP_KERNEL);
+	if (!domain_ids)
+		goto fail_free_state;
+	ret = pkram_load_chunk(ps, domain_ids, state->domain_ids_size);
+	if (ret)
+		goto fail_free_state;
+	state->domain_ids = domain_ids;
+
+	state->root_entry_page = pkram_load_page(ps, NULL, NULL);
+	if (!state->root_entry_page)
+		goto fail_free_state;
+
+	state->qi_desc_page = pkram_load_page(ps, NULL, NULL);
+	if (!state->qi_desc_page)
+		goto fail_free_state;
+
+	state->qi_desc_status = pkram_load_page(ps, NULL, NULL);
+	if (!state->qi_desc_status)
+		goto fail_free_state;
+
+	page = pkram_load_page(ps, NULL, NULL);
+	if (!page)
+		goto fail_free_state;
+	state->ir_table_base = page_address(page);
+	for (i = 1; i < (1 << INTR_REMAP_PAGE_ORDER); i++) {
+		page = pkram_load_page(ps, NULL, NULL);
+		if (!page)
+			goto fail_free_state;
+		set_page_count(page, 0);
+	}
+
+	return state;
+fail_free_state:
+	if (state->domain_ids)
+		kfree(state->domain_ids);
+	if (state->qi_desc_page)
+		__free_page(state->qi_desc_page);
+	if (state->qi_desc_status)
+		__free_page(state->qi_desc_status);
+	if (state->ir_table_base) {
+		while (i--) {
+			page = virt_to_page(state->ir_table_base + i * PAGE_SIZE);
+			set_page_count(page, 1);
+			__free_page(page);
+		}
+	}
+	kfree(state);
+	return NULL;
+}
+
 int intel_iommu_pkram_save(void)
 {
 	struct dmar_drhd_unit *drhd;
@@ -6446,6 +6514,34 @@ int intel_iommu_pkram_save(void)
 fail_pkram_save:
 	pkram_discard_save(&ps);
 	return ret;
+}
+
+int intel_iommu_pkram_load(void)
+{
+	struct intel_iommu_state *state;
+	struct pkram_stream ps;
+	int ret;
+
+	ret = pkram_prepare_load(&ps, "intel-iommu");
+	if (ret)
+		return ret;
+
+	while (pkram_prepare_load_obj(&ps) == 0) {
+		state = intel_iommu_pkram_load_state(&ps);
+		if (!state)
+			goto fail_pkram_load;
+
+		pkram_finish_load_obj(&ps);
+
+		mutex_lock(&intel_iommu_state_lock);
+		list_add(&state->list, &intel_iommu_state_list);
+		mutex_unlock(&intel_iommu_state_lock);
+	}
+	pkram_finish_load(&ps);
+	return 0;
+fail_pkram_load:
+	pkram_finish_load(&ps);
+	return -1;
 }
 
 static int save_intel_iommu(void)
