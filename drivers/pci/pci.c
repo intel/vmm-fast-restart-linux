@@ -6644,3 +6644,38 @@ void pci_dev_clear_keepalive(struct pci_dev *pdev)
 	}
 }
 EXPORT_SYMBOL(pci_dev_clear_keepalive);
+
+static LIST_HEAD(pci_keepalive_list);
+static DEFINE_MUTEX(pci_keepalive_lock);
+
+void free_keepalive_devices()
+{
+	struct pci_keepalive_state *d, *tmp;
+
+	mutex_lock(&pci_keepalive_lock);
+	list_for_each_entry_safe(d, tmp, &pci_keepalive_list, list) {
+		list_del(&d->list);
+		kfree(d);
+	}
+	mutex_unlock(&pci_keepalive_lock);
+
+	return;
+}
+
+struct pci_keepalive_state *
+pci_find_keepalive_state(unsigned char bus_nr, unsigned int devfn)
+{
+	struct pci_keepalive_state *d;
+
+	mutex_lock(&pci_keepalive_lock);
+	list_for_each_entry(d, &pci_keepalive_list, list) {
+		if (d->bus == bus_nr && d->devfn == devfn) {
+			// The deletion and free will be done in free_keepalive_devices.
+			mutex_unlock(&pci_keepalive_lock);
+			return d;
+		}
+	}
+	mutex_unlock(&pci_keepalive_lock);
+
+	return NULL;
+}
