@@ -31,6 +31,10 @@
 #include <linux/vmalloc.h>
 #include <asm/dma.h>
 #include <linux/aer.h>
+#include <linux/pkram.h>
+#include <linux/notifier.h>
+#include <linux/reboot.h>
+#include <linux/kexec.h>
 #include "pci.h"
 
 DEFINE_MUTEX(pci_slot_mutex);
@@ -6679,3 +6683,260 @@ pci_find_keepalive_state(unsigned char bus_nr, unsigned int devfn)
 
 	return NULL;
 }
+
+#ifdef CONFIG_KEXEC_CORE
+
+static void copy_keepalive_resource(struct pci_keepalive_state *state,
+				    struct pci_dev *pdev, unsigned int howmany)
+{
+	int i;
+
+	for (i = 0; i < howmany; i++) {
+		state->resource[i].start = pdev->resource[i].start;
+		state->resource[i].end = pdev->resource[i].end;
+		state->resource[i].flags = pdev->resource[i].flags;
+		state->resource[i].desc = pdev->resource[i].desc;
+	}
+}
+
+static void copy_keepalive_state(struct pci_dev *pdev,
+				 struct pci_keepalive_state *state)
+{
+	state->domain = pci_domain_nr(pdev->bus);
+	state->bus = pdev->bus->number & 0xff;
+	state->devfn = pdev->devfn & 0xff;
+	state->subsystem_vendor = pdev->subsystem_vendor;
+	state->subsystem_device = pdev->subsystem_device;
+	state->pin = pdev->pin;
+	state->dma_mask = pdev->dma_mask;
+	state->current_state = pdev->current_state;
+	state->imm_ready = pdev->imm_ready;
+	state->pm_cap = pdev->pm_cap;
+	state->pme_support = pdev->pme_support;
+	state->pme_poll = pdev->pme_poll;
+	state->d1_support = pdev->d1_support;
+	state->d2_support = pdev->d2_support;
+	state->no_d1d2 = pdev->no_d1d2;
+	state->no_d3cold = pdev->no_d3cold;
+	state->bridge_d3 = pdev->bridge_d3;
+	state->d3cold_allowed = pdev->d3cold_allowed;
+	state->mmio_always_on = pdev->mmio_always_on;
+	state->wakeup_prepared = pdev->wakeup_prepared;
+	state->runtime_d3cold = pdev->runtime_d3cold;
+
+	state->skip_bus_pm = pdev->skip_bus_pm;
+	state->ignore_hotplug = pdev->ignore_hotplug;
+	state->hotplug_user_indicators = pdev->hotplug_user_indicators;
+
+	state->clear_retrain_link = pdev->clear_retrain_link;
+	state->d3hot_delay = pdev->d3hot_delay;
+	state->d3cold_delay = pdev->d3cold_delay;
+
+	state->cfg_size = pdev->cfg_size;
+	state->irq = pdev->irq;
+	state->transparent = pdev->transparent;
+	state->is_hotplug_bridge = pdev->is_hotplug_bridge;
+	state->is_thunderbolt = pdev->is_thunderbolt;
+	state->untrusted = pdev->untrusted;
+	state->broken_intx_masking = pdev->broken_intx_masking;
+	state->non_compliant_bars = pdev->non_compliant_bars;
+	state->dev_flags = pdev->dev_flags;
+	state->ari_enabled = pdev->ari_enabled;
+#ifdef CONFIG_HOTPLUG_PCI_PCIE
+	state->broken_cmd_compl = pdev->broken_cmd_compl;
+#endif
+#ifdef CONFIG_PCIE_PTM
+	state->ptm_root = pdev->ptm_root;
+	state->ptm_enabled = pdev->ptm_enabled;
+	state->ptm_granularity = pdev->ptm_granularity;
+#endif
+
+	state->msi_cap = pdev->msi_cap;
+	state->msix_cap = pdev->msix_cap;
+
+	state->rom_base_reg = pdev->rom_base_reg;
+	state->io_window = pdev->io_window;
+	state->pref_window = pdev->pref_window;
+	state->pref_64_window = pdev->pref_64_window;
+	state->io_window_1k = pdev->io_window_1k;
+
+	state->reset_fn = pdev->reset_fn;
+
+	/*
+	 * We skip pci_read_bases in pci_setup_device. Thus we need to
+	 * preserve them.
+	 * TODO: VF is not supported yet.
+	 */
+	if (pdev->non_compliant_bars || pdev->is_virtfn)
+		return;
+	/* Just copy all of resources for keepalive devices. */
+	copy_keepalive_resource(state, pdev, PCI_NUM_RESOURCES);
+}
+
+static int pci_save_keepalive_state(struct pkram_stream *ps,
+				    struct pci_dev *pdev)
+{
+	struct pci_keepalive_state *state;
+	int err = 0;
+
+	if (!dev_is_keepalive(&pdev->dev))
+		return 0;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	if (!state)
+		return -ENOMEM;
+
+	copy_keepalive_state(pdev, state);
+
+	err = pkram_prepare_save_obj(ps);
+	if (err)
+		goto out_free_state;
+
+	err = pkram_save_chunk(ps, state, sizeof(*state));
+	if (err)
+		goto out_free_state;
+
+	mutex_lock(&pci_keepalive_lock);
+	list_add_tail(&(state->list), &pci_keepalive_list);
+	mutex_unlock(&pci_keepalive_lock);
+
+	pkram_finish_save_obj(ps);
+	return 0;
+out_free_state:
+	kfree(state);
+	return err;
+}
+
+static int pci_bus_save_keepalive_state(struct pkram_stream *ps,
+					struct pci_bus *bus)
+{
+	struct pci_dev *dev;
+	int ret;
+
+	// root bus self is null.
+	if (pci_is_root_bus(bus))
+		goto root_bus;
+
+	if (!bus->self)
+		return 0;
+
+	if (!dev_is_keepalive(&bus->self->dev))
+		return 0;
+
+	ret = pci_save_keepalive_state(ps, bus->self);
+	if (ret)
+		return ret;
+
+root_bus:
+	list_for_each_entry(dev, &bus->devices, bus_list) {
+		if (pci_is_bridge(dev)) {
+			ret = pci_bus_save_keepalive_state(ps, dev->subordinate);
+			if (ret)
+				return ret;
+			continue;
+		}
+
+		ret = pci_save_keepalive_state(ps, dev);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static int pci_save_all_keepalive_states(void)
+{
+	struct pkram_stream ps;
+	struct pci_bus *bus;
+	int err;
+
+	err = pkram_prepare_save(&ps, "pci-keepalive-state", GFP_KERNEL);
+	if (err)
+		return err;
+
+	list_for_each_entry(bus, &pci_root_buses, node) {
+		err = pci_bus_save_keepalive_state(&ps, bus);
+		if (err)
+			goto out_discard_save;
+	}
+
+	pkram_finish_save(&ps);
+
+	return 0;
+out_discard_save:
+	pkram_discard_save(&ps);
+	return err;
+}
+
+static int pci_keepalive_callback(struct notifier_block *notifier,
+				  unsigned long val, void *v)
+{
+	if (pci_save_all_keepalive_states())
+		pr_warn("failed to save pci keepalive states\n");
+	return NOTIFY_OK;
+}
+
+static struct notifier_block pci_keepalive_notifier = {
+	.notifier_call = pci_keepalive_callback,
+	.priority = 1,
+};
+
+static int __init pci_save_keepalive_init(void)
+{
+	register_live_update_notifier(&pci_keepalive_notifier);
+	return 0;
+}
+device_initcall(pci_save_keepalive_init);
+#endif
+
+static int pci_load_keepalive_state(struct pkram_stream *ps)
+{
+	struct pci_keepalive_state *state;
+	int err;
+
+	state = kmalloc(sizeof(*state), GFP_KERNEL);
+	if (!state)
+		return -ENOMEM;
+
+	err = pkram_load_chunk(ps, state, sizeof(*state));
+	if (err)
+		goto load_out_free_state;
+
+	mutex_lock(&pci_keepalive_lock);
+	list_add(&state->list, &pci_keepalive_list);
+	mutex_unlock(&pci_keepalive_lock);
+	return 0;
+load_out_free_state:
+	kfree(state);
+	return err;
+}
+
+static int pci_load_all_keepalive_states(void)
+{
+	struct pkram_stream ps;
+	int err;
+
+	err = pkram_prepare_load(&ps, "pci-keepalive-state");
+	if (err)
+		return err;
+
+	while (!pkram_prepare_load_obj(&ps)) {
+		err = pci_load_keepalive_state(&ps);
+		if (err)
+			goto out_load_fail;
+		pkram_finish_load_obj(&ps);
+	}
+
+out_load_fail:
+	pkram_finish_load(&ps);
+	return err;
+}
+
+static int __init pci_keepalive_load_init(void)
+{
+	if (pci_load_all_keepalive_states())
+		pr_info("no keepalive state loaded\n");
+	return 0;
+}
+
+arch_initcall(pci_keepalive_load_init);
