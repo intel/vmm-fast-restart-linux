@@ -2406,6 +2406,10 @@ static inline bool pci_is_keepalive_dev(struct pci_dev *pdev)
 void pci_dev_set_keepalive(struct pci_dev *pdev);
 void pci_dev_clear_keepalive(struct pci_dev *pdev);
 
+void free_keepalive_devices(void);
+struct pci_keepalive_state *pci_find_keepalive_state(unsigned char bus_nr,
+						     unsigned int devfn);
+
 /* Provide the legacy pci_dma_* API */
 #include <linux/pci-dma-compat.h>
 
