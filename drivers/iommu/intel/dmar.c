@@ -1047,8 +1047,36 @@ static bool pkram_iommu_state_loaded;
 
 extern int intel_iommu_pkram_load(void);
 
+static int iommu_keepalive_restore_state(struct intel_iommu *iommu,
+					 struct intel_iommu_state *state)
+{
+	int ret;
+
+	iommu->keepalive = true;
+	iommu->domain_ids = state->domain_ids;
+	iommu->seq_id = state->seq_id;
+	set_bit(iommu->seq_id, dmar_seq_ids);
+	sprintf(iommu->name, "dmar%d", iommu->seq_id);
+
+	iommu->root_entry = page_address(state->root_entry_page);
+
+	ret = dmar_keepalive_restore_qi(iommu, state);
+	if (ret)
+		return ret;
+
+	ret = iommu_keepalive_restore_ir_table(iommu, state);
+	if (ret)
+		goto free_qi;
+
+	return 0;
+free_qi:
+	kfree(iommu->qi);
+	return ret;
+}
+
 static int alloc_iommu(struct dmar_drhd_unit *drhd)
 {
+	struct intel_iommu_state *iommu_state;
 	struct intel_iommu *iommu;
 	u32 ver, sts;
 	int agaw = -1;
@@ -1069,7 +1097,13 @@ static int alloc_iommu(struct dmar_drhd_unit *drhd)
 	if (!iommu)
 		return -ENOMEM;
 
-	if (dmar_alloc_seq_id(iommu) < 0) {
+	iommu_state = find_intel_iommu_state(drhd->segment,
+					     drhd->reg_base_addr);
+	if (iommu_state) {
+		err = iommu_keepalive_restore_state(iommu, iommu_state);
+		if (err)
+			goto error;
+	} else if (dmar_alloc_seq_id(iommu) < 0) {
 		pr_err("Failed to allocate seq_id\n");
 		err = -ENOSPC;
 		goto error;
@@ -1608,6 +1642,33 @@ static void __dmar_enable_qi(struct intel_iommu *iommu)
 	IOMMU_WAIT_OP(iommu, DMAR_GSTS_REG, readl, (sts & DMA_GSTS_QIES), sts);
 
 	raw_spin_unlock_irqrestore(&iommu->register_lock, flags);
+}
+
+int dmar_keepalive_restore_qi(struct intel_iommu *iommu,
+			      struct intel_iommu_state *state)
+{
+	struct q_inval *qi;
+
+	/*
+	 * queued invalidation is already setup and enabled.
+	 */
+	if (iommu->qi)
+		return 0;
+
+	iommu->qi = kmalloc(sizeof(*qi), GFP_ATOMIC);
+	if (!iommu->qi)
+		return -ENOMEM;
+
+	qi = iommu->qi;
+	qi->desc = page_address(state->qi_desc_page);
+	qi->desc_status = page_address(state->qi_desc_status);
+	qi->free_head = state->qi_free_head;
+	qi->free_tail = state->qi_free_tail;
+	qi->free_cnt = state->qi_free_cnt;
+
+	raw_spin_lock_init(&qi->q_lock);
+
+	return 0;
 }
 
 /*

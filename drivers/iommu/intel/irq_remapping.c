@@ -114,6 +114,9 @@ static void init_ir_status(struct intel_iommu *iommu)
 {
 	u32 gsts;
 
+	if (iommu->keepalive)
+		return;
+
 	gsts = readl(iommu->reg + DMAR_GSTS_REG);
 	if (gsts & DMA_GSTS_IRES)
 		iommu->flags |= VTD_FLAG_IRQ_REMAP_PRE_ENABLED;
@@ -500,6 +503,11 @@ static void iommu_set_irq_remapping(struct intel_iommu *iommu, int mode)
 	u64 addr;
 	u32 sts;
 
+	if (iommu->keepalive) {
+		qi_global_iec(iommu);
+		return;
+	}
+
 	addr = virt_to_phys((void *)iommu->ir_table->base);
 
 	raw_spin_lock_irqsave(&iommu->register_lock, flags);
@@ -525,6 +533,9 @@ static void iommu_enable_irq_remapping(struct intel_iommu *iommu)
 {
 	unsigned long flags;
 	u32 sts;
+
+	if (iommu->keepalive)
+		return;
 
 	raw_spin_lock_irqsave(&iommu->register_lock, flags);
 
@@ -562,25 +573,32 @@ static int intel_setup_irq_remapping(struct intel_iommu *iommu)
 	unsigned long *bitmap;
 	struct page *pages;
 
-	if (iommu->ir_table)
+	if (iommu->ir_table && !iommu->keepalive)
 		return 0;
 
-	ir_table = kzalloc(sizeof(struct ir_table), GFP_KERNEL);
-	if (!ir_table)
-		return -ENOMEM;
+	if (!iommu->keepalive) {
+		ir_table = kzalloc(sizeof(struct ir_table), GFP_KERNEL);
+		if (!ir_table)
+			return -ENOMEM;
 
-	pages = alloc_pages_node(iommu->node, GFP_KERNEL | __GFP_ZERO,
-				 INTR_REMAP_PAGE_ORDER);
-	if (!pages) {
-		pr_err("IR%d: failed to allocate pages of order %d\n",
-		       iommu->seq_id, INTR_REMAP_PAGE_ORDER);
-		goto out_free_table;
-	}
+		pages = alloc_pages_node(iommu->node, GFP_KERNEL | __GFP_ZERO,
+					 INTR_REMAP_PAGE_ORDER);
+		if (!pages) {
+			pr_err("IR%d: failed to allocate pages of order %d\n",
+			       iommu->seq_id, INTR_REMAP_PAGE_ORDER);
+			goto out_free_table;
+		}
 
-	bitmap = bitmap_zalloc(INTR_REMAP_TABLE_ENTRIES, GFP_ATOMIC);
-	if (bitmap == NULL) {
-		pr_err("IR%d: failed to allocate bitmap\n", iommu->seq_id);
-		goto out_free_pages;
+		bitmap = bitmap_zalloc(INTR_REMAP_TABLE_ENTRIES, GFP_ATOMIC);
+		if (bitmap == NULL) {
+			pr_err("IR%d: failed to allocate bitmap\n",
+			       iommu->seq_id);
+			goto out_free_pages;
+		}
+
+		ir_table->base = page_address(pages);
+		ir_table->bitmap = bitmap;
+		iommu->ir_table = ir_table;
 	}
 
 	fn = irq_domain_alloc_named_id_fwnode("INTEL-IR", iommu->seq_id);
@@ -601,10 +619,6 @@ static int intel_setup_irq_remapping(struct intel_iommu *iommu)
 		arch_create_remap_msi_irq_domain(iommu->ir_domain,
 						 "INTEL-IR-MSI",
 						 iommu->seq_id);
-
-	ir_table->base = page_address(pages);
-	ir_table->bitmap = bitmap;
-	iommu->ir_table = ir_table;
 
 	/*
 	 * If the queued invalidation is already initialized,
@@ -742,6 +756,51 @@ static void __init intel_cleanup_irq_remapping(void)
 
 static LIST_HEAD(intel_ir_data_list);
 static DEFINE_SPINLOCK(ir_data_lock);
+
+int iommu_keepalive_restore_ir_table(struct intel_iommu *iommu,
+				     struct intel_iommu_state *state)
+{
+	struct intel_ir_data *data;
+	struct ir_table *ir_table;
+	unsigned long *bitmap;
+	struct page *pages;
+	int i;
+
+	ir_table = kzalloc(sizeof(struct ir_table), GFP_KERNEL);
+	if (!ir_table)
+		return -ENOMEM;
+
+	pages = virt_to_page(state->ir_table_base);
+	bitmap = bitmap_zalloc(INTR_REMAP_TABLE_ENTRIES, GFP_ATOMIC);
+	if (bitmap == NULL) {
+		pr_err("IR%d: failed to allocate bitmap\n", iommu->seq_id);
+		goto out_free_table;
+	}
+
+	ir_table->base = page_address(pages);
+	ir_table->bitmap = bitmap;
+	iommu->ir_table = ir_table;
+
+	spin_lock(&ir_data_lock);
+	list_for_each_entry(data, &intel_ir_data_list, list) {
+		if (data->irq_2_iommu.iommu_seq_id != iommu->seq_id)
+			continue;
+		bitmap_set(iommu->ir_table->bitmap, data->irq_2_iommu.irte_index, 1);
+	}
+	spin_unlock(&ir_data_lock);
+	for (i = 0; i < INTR_REMAP_TABLE_ENTRIES; i++) {
+		struct irte *entry;
+		if (test_bit(i, iommu->ir_table->bitmap))
+			continue;
+		entry = iommu->ir_table->base + i;
+		set_64bit(&entry->low, 0);
+		set_64bit(&entry->high, 0);
+	}
+	return 0;
+out_free_table:
+	kfree(ir_table);
+	return -ENOMEM;
+}
 
 int intel_ir_pkram_load(void)
 {

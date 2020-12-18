@@ -722,6 +722,10 @@ static inline int first_pte_in_page(struct dma_pte *pte)
 extern struct dmar_drhd_unit * dmar_find_matched_drhd_unit(struct pci_dev *dev);
 extern int dmar_find_matched_atsr_unit(struct pci_dev *dev);
 
+extern int dmar_keepalive_restore_qi(struct intel_iommu *iommu,
+				     struct intel_iommu_state *state);
+extern int iommu_keepalive_restore_ir_table(struct intel_iommu *iommu,
+					    struct intel_iommu_state *state);
 extern int dmar_enable_qi(struct intel_iommu *iommu);
 extern void dmar_disable_qi(struct intel_iommu *iommu);
 extern int dmar_reenable_qi(struct intel_iommu *iommu);

@@ -430,6 +430,9 @@ static void init_translation_status(struct intel_iommu *iommu)
 {
 	u32 gsts;
 
+	if (iommu->keepalive)
+		return;
+
 	gsts = readl(iommu->reg + DMAR_GSTS_REG);
 	if (gsts & DMA_GSTS_TES)
 		iommu->flags |= VTD_FLAG_TRANS_PRE_ENABLED;
@@ -1295,6 +1298,9 @@ static int iommu_alloc_root_entry(struct intel_iommu *iommu)
 	struct root_entry *root;
 	unsigned long flags;
 
+	if (iommu->keepalive)
+		return 0;
+
 	root = (struct root_entry *)alloc_pgtable_page(iommu->node);
 	if (!root) {
 		pr_err("Allocating root entry for %s failed\n",
@@ -1701,6 +1707,11 @@ static void iommu_enable_translation(struct intel_iommu *iommu)
 	u32 sts;
 	unsigned long flags;
 
+	if (iommu->keepalive) {
+		iommu->gcmd |= DMA_GCMD_TE;
+		return;
+	}
+
 	raw_spin_lock_irqsave(&iommu->register_lock, flags);
 	iommu->gcmd |= DMA_GCMD_TE;
 	writel(iommu->gcmd, iommu->reg + DMAR_GCMD_REG);
@@ -1744,11 +1755,14 @@ static int iommu_init_domains(struct intel_iommu *iommu)
 
 	spin_lock_init(&iommu->lock);
 
-	iommu->domain_ids = kcalloc(nlongs, sizeof(unsigned long), GFP_KERNEL);
-	if (!iommu->domain_ids) {
-		pr_err("%s: Allocating domain id array failed\n",
-		       iommu->name);
-		return -ENOMEM;
+	if (!iommu->keepalive) {
+		iommu->domain_ids =
+			kcalloc(nlongs, sizeof(unsigned long), GFP_KERNEL);
+		if (!iommu->domain_ids) {
+			pr_err("%s: Allocating domain id array failed\n",
+			       iommu->name);
+			return -ENOMEM;
+		}
 	}
 
 	size = (ALIGN(ndomains, 256) >> 8) * sizeof(struct dmar_domain **);
@@ -3408,6 +3422,7 @@ static int __init init_dmars(void)
 #ifdef CONFIG_INTEL_IOMMU_SVM
 		register_pasid_allocator(iommu);
 #endif
+		/* do we need to bypass this for keepalive case? */
 		iommu_set_root_entry(iommu);
 		iommu->flush.flush_context(iommu, 0, 0, 0, DMA_CCMD_GLOBAL_INVL);
 		iommu->flush.flush_iotlb(iommu, 0, 0, 0, DMA_TLB_GLOBAL_FLUSH);
