@@ -86,6 +86,8 @@ static struct iommu_domain *__iommu_domain_alloc(struct bus_type *bus,
 						 unsigned type);
 static int __iommu_attach_device(struct iommu_domain *domain,
 				 struct device *dev);
+static void __iommu_detach_device(struct iommu_domain *domain,
+				  struct device *dev);
 static int __iommu_attach_group(struct iommu_domain *domain,
 				struct iommu_group *group);
 static void __iommu_detach_group(struct iommu_domain *domain,
@@ -1736,6 +1738,79 @@ static int iommu_group_create_direct_mappings(struct iommu_group *group)
 {
 	return __iommu_group_for_each_dev(group, group,
 					  iommu_do_create_direct_mappings);
+}
+
+struct group_keepalive {
+	struct device *dev;
+	bool keepalive;
+};
+
+static int iommu_check_keepalive(struct device *dev, void *data)
+{
+	struct group_keepalive *gk = data;
+	bool keepalive = dev_is_keepalive(dev);
+
+	if (!gk->dev) {
+		gk->dev = dev;
+		gk->keepalive = keepalive;
+		return 0;
+	}
+
+	if (gk->keepalive != keepalive)
+		return -EINVAL;
+
+	return 0;
+}
+
+static bool iommu_group_is_keepalive(struct iommu_group *group)
+{
+	struct group_keepalive gk;
+
+	gk.dev = NULL;
+	if (__iommu_group_for_each_dev(group, &gk, iommu_check_keepalive))
+		return false;
+
+	return gk.keepalive;
+}
+
+static int __iommu_restore_keepalive_device(struct device *dev, void *data)
+{
+	const struct iommu_ops *ops = dev->bus->iommu_ops;
+	struct iommu_group *group = data;
+	struct iommu_domain *domain;
+	int ret;
+
+	ret = ops->restore_domain(dev, &domain);
+	if (ret)
+		return ret;
+
+	if (domain) {
+		if (group->domain && group->domain != domain) {
+			__iommu_detach_device(domain, dev);
+			return -EINVAL;
+		}
+		if (!group->domain)
+			group->domain = domain;
+	}
+	return 0;
+}
+
+static int iommu_restore_keepalive_device(struct device *dev, void *data)
+{
+	const struct iommu_ops *ops = dev->bus->iommu_ops;
+
+	if (!dev_is_keepalive(dev) || !ops->restore_domain)
+		return 0;
+	return __iommu_restore_keepalive_device(dev, data);
+}
+
+int iommu_restore_keepalive_group(struct bus_type *bus, struct iommu_group *group)
+{
+	if (!iommu_group_is_keepalive(group) || !bus->iommu_ops->restore_domain)
+		return 0;
+
+	return __iommu_group_for_each_dev(group, group,
+					  __iommu_restore_keepalive_device);
 }
 
 int bus_iommu_probe(struct bus_type *bus)
