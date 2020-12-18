@@ -740,11 +740,61 @@ static void __init intel_cleanup_irq_remapping(void)
 		pr_warn("Failed to enable irq remapping. You are vulnerable to irq-injection attacks.\n");
 }
 
+static LIST_HEAD(intel_ir_data_list);
+static DEFINE_SPINLOCK(ir_data_lock);
+
+int intel_ir_pkram_load(void)
+{
+	struct intel_ir_data *state;
+	struct pkram_stream ps;
+	unsigned long cnt;
+	int ret;
+
+	ret = pkram_prepare_load(&ps, "intel_ir_data");
+	if (ret)
+		return ret;
+	ret = pkram_prepare_load_obj(&ps);
+	if (ret)
+		return ret;
+
+	ret = pkram_load_chunk(&ps, &cnt, sizeof(cnt));
+	if (ret)
+		return ret;
+
+	while (cnt--) {
+		state = kmalloc(sizeof(*state), GFP_KERNEL);
+		if (!state) {
+			ret = -ENOMEM;
+			goto fail_pkram_load;
+		}
+
+		ret = pkram_load_chunk(&ps, state, sizeof(*state));
+		if (ret) {
+			kfree(state);
+			goto fail_pkram_load;
+		}
+
+		spin_lock(&ir_data_lock);
+		list_add(&state->list, &intel_ir_data_list);
+		spin_unlock(&ir_data_lock);
+	}
+	pkram_finish_load_obj(&ps);
+	pkram_finish_load(&ps);
+	return 0;
+fail_pkram_load:
+	pkram_finish_load_obj(&ps);
+	pkram_finish_load(&ps);
+	return ret;
+}
+
 static int __init intel_prepare_irq_remapping(void)
 {
 	struct dmar_drhd_unit *drhd;
 	struct intel_iommu *iommu;
 	int eim = 0;
+
+	if (intel_ir_pkram_load())
+		pr_info("no intel_ir state loaded\n");
 
 	if (irq_remap_broken) {
 		pr_warn("This system BIOS has enabled interrupt remapping\n"
@@ -1345,9 +1395,6 @@ static void intel_irq_remapping_prepare_irte(struct intel_ir_data *data,
 		break;
 	}
 }
-
-static LIST_HEAD(intel_ir_data_list);
-static DEFINE_SPINLOCK(ir_data_lock);
 
 int intel_ir_pkram_save(void)
 {
