@@ -95,6 +95,7 @@ static void __iommu_detach_group(struct iommu_domain *domain,
 static int iommu_create_device_direct_mappings(struct iommu_group *group,
 					       struct device *dev);
 static struct iommu_group *iommu_group_get_for_dev(struct device *dev);
+static int iommu_restore_keepalive_device(struct device *dev, void *data);
 
 #define IOMMU_GROUP_ATTR(_name, _mode, _show, _store)		\
 struct iommu_group_attribute iommu_group_attr_##_name =		\
@@ -257,7 +258,6 @@ int iommu_probe_device(struct device *dev)
 	group = iommu_group_get(dev);
 	if (!group)
 		goto err_release;
-
 	/*
 	 * Try to allocate a default domain - needs support from the
 	 * IOMMU driver. There are still some drivers which don't
@@ -267,6 +267,13 @@ int iommu_probe_device(struct device *dev)
 	iommu_alloc_default_domain(group, dev);
 
 	if (group->default_domain) {
+		ret = iommu_restore_keepalive_device(dev, group);
+		if (ret) {
+			pr_warn("failed to restore domain for keepalive device %s, error = %d\n",
+				dev_name(dev), ret);
+			iommu_group_put(group);
+			goto err_release;
+		}
 		if (!group->domain) {
 			group->domain = group->default_domain;
 			ret = __iommu_attach_device(group->default_domain, dev);
@@ -1845,6 +1852,13 @@ int bus_iommu_probe(struct bus_type *bus)
 
 		iommu_group_create_direct_mappings(group);
 
+		ret = iommu_restore_keepalive_group(bus, group);
+		if (ret) {
+			pr_warn("failed to restore keepalive group %d, error = %d\n",
+				group->id, ret);
+			mutex_unlock(&group->mutex);
+			break;
+		}
 
 		if (!group->domain) {
 			group->domain = group->default_domain;
