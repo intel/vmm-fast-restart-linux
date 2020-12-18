@@ -36,6 +36,82 @@ enum pci_mmap_api {
 	PCI_MMAP_SYSFS,	/* mmap on /sys/bus/pci/devices/<BDF>/resource<N> */
 	PCI_MMAP_PROCFS	/* mmap on /proc/bus/pci/<BDF> */
 };
+
+struct pci_keepalive_state {
+	struct list_head	list;
+	unsigned int 	domain;
+	unsigned int 	bus;
+	unsigned int 	devfn;
+
+	/* below is the pci dev states to save and load */
+	unsigned short	subsystem_vendor;
+	unsigned short	subsystem_device;
+	u8		pin;		/* Interrupt pin this device uses */
+	u64		dma_mask;
+
+	pci_power_t	current_state;
+	unsigned int	imm_ready:1;	/* Supports Immediate Readiness */
+	u8		pm_cap;		/* PM capability offset */
+	unsigned int	pme_support:5;	/* Bitmask of states from which PME#
+					   can be generated */
+	unsigned int	pme_poll:1;	/* Poll device's PME status bit */
+	unsigned int	d1_support:1;	/* Low power state D1 is supported */
+	unsigned int	d2_support:1;	/* Low power state D2 is supported */
+	unsigned int	no_d1d2:1;	/* D1 and D2 are forbidden */
+	unsigned int	no_d3cold:1;	/* D3cold is forbidden */
+	unsigned int	bridge_d3:1;	/* Allow D3 for bridge */
+	unsigned int	d3cold_allowed:1;	/* D3cold is allowed by user */
+	unsigned int	mmio_always_on:1;	/* Disallow turning off io/mem
+						   decoding during BAR sizing */
+	unsigned int	wakeup_prepared:1;
+	unsigned int	runtime_d3cold:1;	/* Whether go through runtime
+						   D3cold, not set for devices
+						   powered on/off by the
+						   corresponding bridge */
+	unsigned int	skip_bus_pm:1;	/* Internal: Skip bus-level PM */
+	unsigned int	ignore_hotplug:1;	/* Ignore hotplug events */
+	unsigned int	hotplug_user_indicators:1; /* SlotCtl indicators
+						      controlled exclusively by
+						      user sysfs */
+	unsigned int	clear_retrain_link:1;	/* Need to clear Retrain Link
+						   bit manually */
+	unsigned int	d3hot_delay;	/* D3->D0 transition time in ms */
+	unsigned int	d3cold_delay;	/* D3cold->D0 transition time in ms */
+
+	int 		cfg_size;
+	unsigned int	irq;
+	unsigned int	transparent:1;		/* Subtractive decode bridge */
+	unsigned int	is_hotplug_bridge:1;
+	unsigned int	is_thunderbolt:1;
+	unsigned int	untrusted:1;
+	unsigned int	broken_intx_masking:1;	/* INTx masking can't be used */
+	unsigned int	non_compliant_bars:1;	/* Broken BARs; ignore them */
+	pci_dev_flags_t dev_flags;
+	unsigned int	ari_enabled:1;		/* ARI forwarding */
+#ifdef CONFIG_HOTPLUG_PCI_PCIE
+	unsigned int	broken_cmd_compl:1;	/* No compl for some cmds */
+#endif
+
+#ifdef CONFIG_PCIE_PTM
+	unsigned int	ptm_root:1;
+	unsigned int	ptm_enabled:1;
+	u8		ptm_granularity;
+#endif
+	u8		msi_cap;
+	u8		msix_cap;
+
+	u8		rom_base_reg;		/* Config register controlling ROM */
+	unsigned int	io_window:1;		/* Bridge has I/O window */
+	unsigned int	pref_window:1;		/* Bridge has pref mem window */
+	unsigned int	pref_64_window:1;	/* Pref mem window is 64-bit */
+	unsigned int	io_window_1k:1;		/* Intel bridge 1K I/O windows */
+
+	unsigned int    reset_fn:1;
+
+	struct resource resource[DEVICE_COUNT_RESOURCE]; /* I/O and memory regions + expansion ROMs */
+	/* TODO: quirk_no_aersid will change bus_flags. */
+};
+
 int pci_mmap_fits(struct pci_dev *pdev, int resno, struct vm_area_struct *vmai,
 		  enum pci_mmap_api mmap_api);
 
