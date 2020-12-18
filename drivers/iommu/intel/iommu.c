@@ -2628,6 +2628,33 @@ find_intel_iommu_state(u32 segment, u64 reg_base_addr)
 	return NULL;
 }
 
+static LIST_HEAD(devinfo_iommu_list);
+static LIST_HEAD(devinfo_domain_list);
+static DEFINE_MUTEX(keepalive_devinfo_lock);
+
+struct devinfo_iommu {
+	struct list_head list;
+	int seq_id;
+	int devinfo_cnt;
+	struct list_head devinfo_list;
+};
+
+struct devinfo_domain {
+	struct list_head list;
+	struct dmar_domain *domain;
+	int devinfo_cnt;
+	struct list_head devinfo_list;
+};
+
+struct keepalive_devinfo {
+	struct list_head domain_list;
+	struct list_head iommu_list;
+	int iommu_seq_id;
+	u32 segment;
+	u8 bus;
+	u8 devfn;
+};
+
 static struct dmar_domain *dmar_insert_one_dev_info(struct intel_iommu *iommu,
 						    int bus, int devfn,
 						    struct device *dev,
@@ -6349,6 +6376,239 @@ static void __init check_tylersburg_isoch(void)
 	pr_warn("Recommended TLB entries for ISOCH unit is 16; your BIOS set %d\n",
 	       vtisochctrl);
 }
+
+static struct devinfo_iommu *__find_devinfo_iommu(int seq_id)
+{
+	struct devinfo_iommu *di;
+
+	list_for_each_entry(di, &devinfo_iommu_list, list) {
+		if (di->seq_id == seq_id)
+			return di;
+	}
+	return NULL;
+}
+
+static int insert_devinfo_iommu_list(struct keepalive_devinfo *devinfo)
+{
+	struct devinfo_iommu *di;
+	struct keepalive_devinfo *d;
+	u64 key;
+
+	di = __find_devinfo_iommu(devinfo->iommu_seq_id);
+	if (!di) {
+		di = kzalloc(sizeof(*di), GFP_ATOMIC);
+		if (!di)
+			return -ENOMEM;
+		di->seq_id = devinfo->iommu_seq_id;
+		INIT_LIST_HEAD(&di->devinfo_list);
+		list_add(&di->list, &devinfo_iommu_list);
+	}
+
+	key = ((u64)devinfo->segment) << 32 |
+		((u64)devinfo->bus) << 8 |
+		devinfo->devfn;
+
+	list_for_each_entry(d, &di->devinfo_list, iommu_list) {
+		u64 key2 = ((u64)d->segment) << 32 | ((u64)d->bus) << 8 | d->devfn;
+
+		if (key < key2)
+			break;
+	}
+	list_add_tail(&devinfo->iommu_list, &d->iommu_list);
+	di->devinfo_cnt++;
+	return 0;
+}
+
+static void domain_free_devinfo_list(struct devinfo_domain *dd)
+{
+	while (dd->devinfo_cnt) {
+		struct keepalive_devinfo *devinfo;
+
+		devinfo = list_first_entry(&dd->devinfo_list,
+					   struct keepalive_devinfo,
+					   domain_list);
+		list_del(&devinfo->domain_list);
+		kfree(devinfo);
+		dd->devinfo_cnt--;
+	}
+}
+
+static void free_keepalive_devinfo_list(void)
+{
+	struct devinfo_domain *dd;
+	struct devinfo_iommu *di;
+
+	mutex_lock(&keepalive_devinfo_lock);
+	while (!list_empty(&devinfo_domain_list)) {
+		dd = list_first_entry(&devinfo_domain_list,
+				      struct devinfo_domain,
+				      list);
+		list_del(&dd->list);
+		domain_free_devinfo_list(dd);
+		kfree(dd);
+	}
+
+	while (!list_empty(&devinfo_iommu_list)) {
+		di = list_first_entry(&devinfo_iommu_list,
+				      struct devinfo_iommu,
+				      list);
+		list_del(&di->list);
+		kfree(di);
+	}
+	mutex_unlock(&keepalive_devinfo_lock);
+}
+
+static int get_one_devinfo(struct devinfo_domain *dd,
+			   struct device_domain_info *info)
+{
+	struct keepalive_devinfo *devinfo;
+	struct device *dev = info->dev;
+	struct pci_dev *pdev;
+	int ret;
+
+	if (!dev_is_pci(dev) || !dev_is_keepalive(dev))
+		return -EINVAL;
+	pdev = to_pci_dev(dev);
+	if (pci_is_bridge(pdev))
+		return 0;
+	devinfo = kmalloc(sizeof(*devinfo), GFP_ATOMIC);
+	if (!devinfo)
+		return -ENOMEM;
+	devinfo->iommu_seq_id = info->iommu->seq_id;
+	devinfo->segment = info->segment;
+	devinfo->bus = info->bus;
+	devinfo->devfn = info->devfn;
+	ret = insert_devinfo_iommu_list(devinfo);
+	if (ret) {
+		kfree(devinfo);
+		return ret;
+	}
+	list_add(&devinfo->domain_list, &dd->devinfo_list);
+	dd->devinfo_cnt++;
+	return 0;
+}
+
+static int domain_get_devinfo_list(struct dmar_domain *domain)
+{
+	struct device_domain_info *info;
+	struct devinfo_domain *dd;
+	int ret;
+
+	dd = kzalloc(sizeof(*dd), GFP_ATOMIC);
+	if (!dd)
+		return -ENOMEM;
+	INIT_LIST_HEAD(&dd->devinfo_list);
+	list_for_each_entry(info, &domain->devices, link) {
+		ret = get_one_devinfo(dd, info);
+		if (ret) {
+			domain_free_devinfo_list(dd);
+			kfree(dd);
+			return ret;
+		}
+	}
+	list_add(&dd->list, &devinfo_domain_list);
+	return 0;
+}
+
+static bool dmar_domain_is_keepalive(struct dmar_domain *domain)
+{
+	struct device_domain_info *info;
+	struct pci_dev *pdev;
+
+	if (list_empty(&domain->devices))
+		return false;
+
+	info = list_first_entry(&domain->devices,
+				struct device_domain_info,
+				link);
+	if (!dev_is_keepalive(info->dev))
+		return false;
+	if (!dev_is_pci(info->dev))
+		return false;
+	pdev = to_pci_dev(info->dev);
+	if (pci_is_bridge(pdev))
+		return false;
+	return true;
+}
+
+static int get_keepalive_devinfo_list(void)
+{
+	struct dmar_domain *domain;
+	unsigned long flags;
+	int ret;
+
+	mutex_lock(&dmar_domain_lock);
+	spin_lock_irqsave(&device_domain_lock, flags);
+	list_for_each_entry(domain, &dmar_domain_list, list) {
+		if (!dmar_domain_is_keepalive(domain))
+			continue;
+		ret = domain_get_devinfo_list(domain);
+		if (ret)
+			goto fail_free_list;
+	}
+	spin_unlock_irqrestore(&device_domain_lock, flags);
+	mutex_unlock(&dmar_domain_lock);
+	return 0;
+fail_free_list:
+	spin_unlock_irqrestore(&device_domain_lock, flags);
+	mutex_unlock(&dmar_domain_lock);
+	free_keepalive_devinfo_list();
+	return -ENOMEM;
+}
+
+static int iommu_save_keepalive_devinfo(struct pkram_stream *ps,
+					struct devinfo_domain *dd)
+{
+	struct keepalive_devinfo *devinfo;
+	int ret;
+
+	ret = pkram_prepare_save_obj(ps);
+	if (ret)
+		return ret;
+
+	ret = pkram_save_chunk(ps, &dd->devinfo_cnt, sizeof(int));
+	if (ret)
+		return ret;
+	list_for_each_entry(devinfo, &dd->devinfo_list, domain_list) {
+		ret = pkram_save_chunk(ps, devinfo, sizeof(*devinfo));
+		if (ret)
+			return ret;
+	}
+	pkram_finish_save_obj(ps);
+	return 0;
+}
+
+static int save_keepalive_devinfo(void)
+{
+	struct devinfo_domain *dd;
+	struct pkram_stream ps;
+	int ret;
+
+	ret = get_keepalive_devinfo_list();
+	if (ret)
+		return ret;
+
+	ret = pkram_prepare_save(&ps, "intel-iommu-keepalive-devinfo", GFP_KERNEL);
+	if (ret)
+		goto fail_free_list;
+
+	mutex_lock(&keepalive_devinfo_lock);
+	list_for_each_entry(dd, &devinfo_domain_list, list) {
+		ret = iommu_save_keepalive_devinfo(&ps, dd);
+		if (ret) {
+			mutex_unlock(&keepalive_devinfo_lock);
+			goto fail_free_list;
+		}
+	}
+	mutex_unlock(&keepalive_devinfo_lock);
+	pkram_finish_save(&ps);
+	return 0;
+fail_free_list:
+	free_keepalive_devinfo_list();
+	pkram_discard_save(&ps);
+	return ret;
+}
+
 struct did_ctx {
 	struct intel_iommu *iommu;
 	unsigned long *domain_ids;
@@ -6566,6 +6826,10 @@ static int save_intel_iommu(void)
 {
 	if (intel_iommu_pkram_save()) {
 		pr_warn("failed to save intel iommu state \n");
+	}
+
+	if (save_keepalive_devinfo()) {
+		pr_warn("failed to save intel iommu keepalive devinfo.\n");
 	}
 
 	return 0;
