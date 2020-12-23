@@ -26,6 +26,7 @@
 #include <linux/sched/smt.h>
 #include <linux/slab.h>
 #include <linux/tboot.h>
+#include <linux/reboot.h>
 #include <linux/trace_events.h>
 #include <linux/entry-kvm.h>
 
@@ -7953,6 +7954,17 @@ static void vmx_exit(void)
 }
 module_exit(vmx_exit);
 
+static int vmx_save_callback(struct notifier_block *notifier,
+				  unsigned long val, void *v)
+{
+	return NOTIFY_OK;
+}
+
+static struct notifier_block vmx_save_notifier = {
+	.notifier_call = vmx_save_callback,
+	.priority = 1,
+};
+
 static int __init vmx_init(void)
 {
 	int r, cpu;
@@ -8028,6 +8040,8 @@ static int __init vmx_init(void)
 	 */
 	if (!enable_ept)
 		allow_smaller_maxphyaddr = true;
+
+	register_live_update_notifier(&vmx_save_notifier);
 
 	return 0;
 }
