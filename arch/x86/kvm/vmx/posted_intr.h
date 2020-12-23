@@ -97,6 +97,7 @@ int pi_update_irte(struct kvm *kvm, unsigned int host_irq, uint32_t guest_irq,
 		   bool set);
 
 int vmx_pkram_save(void);
+int vmx_pkram_load(void);
 int pi_do_keepalive(struct kvm *kvm, int guest_irq, void **data, bool save);
 
 void vmx_init_pi_desc(struct kvm *kvm);

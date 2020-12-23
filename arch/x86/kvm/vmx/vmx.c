@@ -8045,6 +8045,9 @@ static int __init vmx_init(void)
 
 	register_live_update_notifier(&vmx_save_notifier);
 
+	if (vmx_pkram_load())
+		pr_info("no vmx state loaded\n");
+
 	return 0;
 }
 module_init(vmx_init);

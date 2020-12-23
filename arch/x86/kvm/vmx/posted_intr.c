@@ -436,6 +436,66 @@ fail_pkram_save:
 	return ret;
 }
 
+int vmx_pkram_load(void)
+{
+	struct vmx_keepalive_state *state;
+	struct pkram_stream ps;
+	struct page *page;
+	int ret, i;
+
+	ret = pkram_prepare_load(&ps, "vmx");
+	if (ret)
+		return ret;
+
+	pkram_prepare_load_obj(&ps);
+	mutex_lock(&vmx_keepalive_state_lock);
+
+	ret = pkram_load_chunk(&ps, &vmx_keepalive_state_count,
+			       sizeof(unsigned long));
+	if (ret)
+		goto fail_pkram_load;
+
+	for (i = 0; i < vmx_keepalive_state_count; i++) {
+		state = kmalloc(sizeof(*state), GFP_KERNEL);
+		if (!state)
+			goto fail_pkram_load;
+		ret = pkram_load_chunk(&ps, state, sizeof(*state));
+		if (ret)
+			goto fail_pkram_load;
+		state->page = NULL;
+		list_add_tail(&state->list, &vmx_keepalive_state_list);
+	}
+
+	list_for_each_entry(state, &vmx_keepalive_state_list, list) {
+		page = pkram_load_page(&ps, NULL, NULL);
+		if (!page)
+			goto fail_pkram_load;
+		state->page = page;
+	}
+
+	list_for_each_entry(state, &vmx_keepalive_state_list, list)
+		set_page_count(state->page, state->page_refcnt);
+
+	mutex_unlock(&vmx_keepalive_state_lock);
+	pkram_finish_load_obj(&ps);
+	pkram_finish_load(&ps);
+	return 0;
+fail_pkram_load:
+	while (!list_empty(&vmx_keepalive_state_list)) {
+		state = list_first_entry(&vmx_keepalive_state_list,
+					 struct vmx_keepalive_state,
+					 list);
+		if (state->page)
+			__free_page(page);
+		list_del(&state->list);
+		kfree(state);
+	}
+	vmx_keepalive_state_count = 0;
+	mutex_unlock(&vmx_keepalive_state_lock);
+	pkram_finish_load(&ps);
+	return -1;
+}
+
 #define PAGE_PI_DESC_BITS	(PAGE_SIZE/sizeof(struct pi_desc))
 
 static void pid_page_prepare(struct page *page)
