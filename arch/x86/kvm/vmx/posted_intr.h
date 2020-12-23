@@ -95,6 +95,8 @@ void __init pi_init_cpu(int cpu);
 bool pi_has_pending_interrupt(struct kvm_vcpu *vcpu);
 int pi_update_irte(struct kvm *kvm, unsigned int host_irq, uint32_t guest_irq,
 		   bool set);
+
+int vmx_pkram_save(void);
 int pi_do_keepalive(struct kvm *kvm, int guest_irq, void **data, bool save);
 
 void vmx_init_pi_desc(struct kvm *kvm);

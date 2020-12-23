@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/kvm_host.h>
+#include <linux/pkram.h>
 
 #include <asm/irq_remapping.h>
 #include <asm/cpu.h>
@@ -386,6 +387,53 @@ static void vmx_remove_keepalive_pid_page(struct page *page)
 		}
 	}
 	mutex_unlock(&vmx_keepalive_state_lock);
+}
+
+int vmx_pkram_save(void)
+{
+	struct vmx_keepalive_state *state;
+	struct pkram_stream ps;
+	int ret;
+
+	ret = pkram_prepare_save(&ps, "vmx", GFP_KERNEL);
+	if (ret)
+		return ret;
+
+	pkram_prepare_save_obj(&ps);
+
+	mutex_lock(&vmx_keepalive_state_lock);
+
+	ret = pkram_save_chunk(&ps, &vmx_keepalive_state_count,
+			       sizeof(unsigned long));
+	if (ret)
+		goto fail_pkram_save;
+
+	list_for_each_entry(state, &vmx_keepalive_state_list, list) {
+		state->page_refcnt = page_ref_count(state->page);
+		ret = pkram_save_chunk(&ps, state, sizeof(*state));
+		if (ret) {
+			pkram_finish_save_obj(&ps);
+			mutex_unlock(&vmx_keepalive_state_lock);
+			goto fail_pkram_save;
+		}
+	}
+
+	list_for_each_entry(state, &vmx_keepalive_state_list, list) {
+		ret = pkram_save_page(&ps, state->page, 0);
+		if (ret) {
+			pkram_finish_save_obj(&ps);
+			mutex_unlock(&vmx_keepalive_state_lock);
+			goto fail_pkram_save;
+		}
+	}
+	mutex_unlock(&vmx_keepalive_state_lock);
+
+	pkram_finish_save_obj(&ps);
+	pkram_finish_save(&ps);
+	return 0;
+fail_pkram_save:
+	pkram_discard_save(&ps);
+	return ret;
 }
 
 #define PAGE_PI_DESC_BITS	(PAGE_SIZE/sizeof(struct pi_desc))
