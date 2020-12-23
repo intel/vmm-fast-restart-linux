@@ -26,6 +26,7 @@
 #include <linux/vfio.h>
 #include <linux/vgaarb.h>
 #include <linux/nospec.h>
+#include <linux/pkram.h>
 #include <linux/reboot.h>
 #include <linux/sched/mm.h>
 #include <linux/irqdomain.h>
@@ -338,6 +339,64 @@ struct keepalive_state {
 
 static LIST_HEAD(keepalive_state_list);
 static DEFINE_MUTEX(keepalive_state_lock);
+
+static int vfio_pci_pkram_save_state(struct pkram_stream *ps,
+				     struct keepalive_state *state)
+{
+	int ret;
+
+	ret = pkram_save_chunk(ps, state, sizeof(*state));
+	if (ret)
+		return ret;
+	ret = pkram_save_chunk(ps, state->vconfig, state->vconfig_size);
+	if (ret)
+		return ret;
+	ret = pkram_save_chunk(ps, state->pci_saved_state,
+			       state->saved_state_size);
+	if (ret)
+		return ret;
+	if (!state->pm_save_size)
+		goto after_pm_save;
+	ret = pkram_save_chunk(ps, state->pm_save, state->pm_save_size);
+	if (ret)
+		return ret;
+after_pm_save:
+	ret = pkram_save_chunk(ps, state->saved_irq_data, state->saved_num_ctx * sizeof(void *));
+	if (ret)
+		return ret;
+
+	return 0;
+}
+
+static int vfio_pci_pkram_save(void)
+{
+	struct keepalive_state *state;
+	struct pkram_stream ps;
+	int ret;
+
+	ret = pkram_prepare_save(&ps, "vfio-pci", GFP_KERNEL);
+	if (ret)
+		return ret;
+
+	mutex_lock(&keepalive_state_lock);
+	list_for_each_entry(state, &keepalive_state_list, list) {
+		pkram_prepare_save_obj(&ps);
+		ret = vfio_pci_pkram_save_state(&ps, state);
+		if (ret) {
+			pkram_finish_save_obj(&ps);
+			mutex_unlock(&keepalive_state_lock);
+			goto fail_pkram_save;
+		}
+		pkram_finish_save_obj(&ps);
+	}
+	mutex_unlock(&keepalive_state_lock);
+
+	pkram_finish_save(&ps);
+	return 0;
+fail_pkram_save:
+	pkram_discard_save(&ps);
+	return ret;
+}
 
 static struct keepalive_state *find_keepalive_state(int bus, int devfn)
 {
@@ -2813,6 +2872,8 @@ static void __init vfio_pci_fill_ids(void)
 static int vfio_pci_save_callback(struct notifier_block *notifier,
 				  unsigned long val, void *v)
 {
+	if (vfio_pci_pkram_save())
+		pr_warn("failed to save vfio-pci states\n");
 	return NOTIFY_OK;
 }
 
