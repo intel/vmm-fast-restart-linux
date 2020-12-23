@@ -330,6 +330,9 @@ struct keepalive_state {
 	void **saved_irq_data;
 	struct pci_saved_state *pci_saved_state;
 	struct pci_saved_state *pm_save;
+	int vconfig_size;
+	int saved_state_size;
+	int pm_save_size;
 };
 
 static LIST_HEAD(keepalive_state_list);
@@ -584,6 +587,7 @@ static int save_keepalive_state(struct vfio_pci_device *vdev)
 	}
 
 	state->vconfig = vdev->vconfig;
+	state->vconfig_size = vdev->pdev->cfg_size;
 	vdev->vconfig = NULL;
 	for (i = 0; i < 7; i++)
 		state->rbar[i] = vdev->rbar[i];
@@ -593,8 +597,11 @@ static int save_keepalive_state(struct vfio_pci_device *vdev)
 	state->bardirty = vdev->bardirty;
 	state->pci_saved_state = vdev->pci_saved_state;
 	state->keepalive_err_cnt = vdev->keepalive_err_cnt;
+	state->saved_state_size =
+		pci_saved_state_size(vdev->pci_saved_state);
 	vdev->pci_saved_state = NULL;
 	state->pm_save = vdev->pm_save;
+	state->pm_save_size = pci_saved_state_size(vdev->pm_save);
 	vdev->pm_save = NULL;
 
 	state->saved_num_ctx = vdev->saved_num_ctx;
