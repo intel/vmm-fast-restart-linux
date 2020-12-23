@@ -26,6 +26,7 @@
 #include <linux/vfio.h>
 #include <linux/vgaarb.h>
 #include <linux/nospec.h>
+#include <linux/reboot.h>
 #include <linux/sched/mm.h>
 #include <linux/irqdomain.h>
 
@@ -2809,6 +2810,17 @@ static void __init vfio_pci_fill_ids(void)
 	}
 }
 
+static int vfio_pci_save_callback(struct notifier_block *notifier,
+				  unsigned long val, void *v)
+{
+	return NOTIFY_OK;
+}
+
+static struct notifier_block vfio_pci_save_notifier = {
+	.notifier_call = vfio_pci_save_callback,
+	.priority = 1,
+};
+
 static int __init vfio_pci_init(void)
 {
 	int ret;
@@ -2827,6 +2839,8 @@ static int __init vfio_pci_init(void)
 
 	if (disable_denylist)
 		pr_warn("device denylist disabled.\n");
+
+	register_live_update_notifier(&vfio_pci_save_notifier);
 
 	return 0;
 
