@@ -7957,6 +7957,8 @@ module_exit(vmx_exit);
 static int vmx_save_callback(struct notifier_block *notifier,
 				  unsigned long val, void *v)
 {
+	if (vmx_pkram_save())
+		pr_warn("failed to save vmx states\n");
 	return NOTIFY_OK;
 }
 
