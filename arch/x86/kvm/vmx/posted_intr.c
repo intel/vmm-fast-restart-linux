@@ -331,6 +331,63 @@ out:
 	return ret;
 }
 
+struct vmx_keepalive_state {
+	struct list_head list;
+	int refcnt;
+	int page_refcnt;
+	struct page *page;
+};
+
+static unsigned long vmx_keepalive_state_count;
+static LIST_HEAD(vmx_keepalive_state_list);
+static DEFINE_MUTEX(vmx_keepalive_state_lock);
+
+static int vmx_add_keepalive_pid_page(struct page *page)
+{
+	struct vmx_keepalive_state *state;
+
+	mutex_lock(&vmx_keepalive_state_lock);
+	list_for_each_entry(state, &vmx_keepalive_state_list, list) {
+		if (state->page == page) {
+			state->refcnt++;
+			mutex_unlock(&vmx_keepalive_state_lock);
+			return 0;
+		}
+	}
+	state = kmalloc(sizeof(*state), GFP_KERNEL);
+	if (!state) {
+		mutex_unlock(&vmx_keepalive_state_lock);
+		return -ENOMEM;
+	}
+	get_page(page);
+	state->page = page;
+	state->refcnt = 1;
+	vmx_keepalive_state_count++;
+	list_add(&state->list, &vmx_keepalive_state_list);
+	mutex_unlock(&vmx_keepalive_state_lock);
+	return 0;
+}
+
+static void vmx_remove_keepalive_pid_page(struct page *page)
+{
+	struct vmx_keepalive_state *state;
+
+	mutex_lock(&vmx_keepalive_state_lock);
+	list_for_each_entry(state, &vmx_keepalive_state_list, list) {
+		if (state->page == page) {
+			state->refcnt--;
+			if (!state->refcnt) {
+				put_page(page);
+				list_del(&state->list);
+				kfree(state);
+				vmx_keepalive_state_count--;
+			}
+			break;
+		}
+	}
+	mutex_unlock(&vmx_keepalive_state_lock);
+}
+
 #define PAGE_PI_DESC_BITS	(PAGE_SIZE/sizeof(struct pi_desc))
 
 static void pid_page_prepare(struct page *page)
@@ -456,13 +513,20 @@ static int vmx_vcpu_save_pi_desc(struct kvm_vcpu *vcpu, void **data)
 	struct kvm_vmx *kv = to_kvm_vmx(vcpu->kvm);
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
 	struct page *page;
+	int ret;
 
 	mutex_lock(&kv->pid_page_lock);
 
 	page = virt_to_page((unsigned long)vmx->pi_desc & PAGE_MASK);
 	get_page(page);
 
-	*data = virt_to_phys(vmx->pi_desc);
+	ret = vmx_add_keepalive_pid_page(page);
+	if (ret) {
+		mutex_unlock(&kv->pid_page_lock);
+		return ret;
+	}
+
+	*data = (void *)virt_to_phys(vmx->pi_desc);
 	pi_set_sn(vmx->pi_desc);
 
 	mutex_unlock(&kv->pid_page_lock);
@@ -505,6 +569,7 @@ static int vmx_vcpu_restore_pi_desc(struct kvm_vcpu *vcpu, void **data)
 	if (!pid_page_lru_linked(page))
 		list_add(&page->lru, &kv->pid_page_list);
 	put_page(page);
+	vmx_remove_keepalive_pid_page(page);
 
 	mutex_unlock(&kv->pid_page_lock);
 
