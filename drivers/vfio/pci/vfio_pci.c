@@ -398,6 +398,94 @@ fail_pkram_save:
 	return ret;
 }
 
+static struct keepalive_state *
+vfio_pci_pkram_load_state(struct pkram_stream *ps)
+{
+	struct keepalive_state *state;
+	int ret;
+
+	state = kmalloc(sizeof(*state), GFP_KERNEL);
+	if (!state)
+		return NULL;
+	ret = pkram_load_chunk(ps, state, sizeof(*state));
+	if (ret)
+		goto fail_free_state;
+
+	state->vconfig = kmalloc(state->vconfig_size, GFP_KERNEL);
+	if (!state->vconfig)
+		goto fail_free_state;
+	ret = pkram_load_chunk(ps, state->vconfig, state->vconfig_size);
+	if (ret)
+		goto fail_free_vconfig;
+
+	state->pci_saved_state = kmalloc(state->saved_state_size, GFP_KERNEL);
+	if (!state->pci_saved_state)
+		goto fail_free_vconfig;
+	ret = pkram_load_chunk(ps, state->pci_saved_state, state->saved_state_size);
+	if (ret)
+		goto fail_free_saved_state;
+
+	if (!state->pm_save_size) {
+		state->pm_save = NULL;
+		goto after_pm_save;
+	}
+	state->pm_save = kmalloc(state->pm_save_size, GFP_KERNEL);
+	if (!state->pm_save)
+		goto fail_free_saved_state;
+	ret = pkram_load_chunk(ps, state->pm_save, state->pm_save_size);
+	if (ret)
+		goto fail_free_pm_save;
+
+after_pm_save:
+	state->saved_irq_data = kzalloc(state->saved_num_ctx * sizeof(void *), GFP_KERNEL);
+	if (!state->saved_irq_data)
+		goto fail_free_pm_save;
+	ret = pkram_load_chunk(ps, state->saved_irq_data, state->saved_num_ctx * sizeof(void *));
+	if (ret)
+		goto fail_free_saved_irq_data;
+
+	return state;
+fail_free_saved_irq_data:
+	kfree(state->saved_irq_data);
+fail_free_pm_save:
+	kfree(state->pm_save);
+fail_free_saved_state:
+	kfree(state->pci_saved_state);
+fail_free_vconfig:
+	kfree(state->vconfig);
+fail_free_state:
+	kfree(state);
+	return NULL;
+}
+
+static int vfio_pci_pkram_load(void)
+{
+	struct keepalive_state *state;
+	struct pkram_stream ps;
+	int ret;
+
+	ret = pkram_prepare_load(&ps, "vfio-pci");
+	if (ret)
+		return ret;
+
+	while (pkram_prepare_load_obj(&ps) == 0) {
+		state = vfio_pci_pkram_load_state(&ps);
+		if (!state)
+			goto fail_pkram_load;
+
+		mutex_lock(&keepalive_state_lock);
+		list_add(&state->list, &keepalive_state_list);
+		mutex_unlock(&keepalive_state_lock);
+
+		pkram_finish_load_obj(&ps);
+	}
+	pkram_finish_load(&ps);
+	return 0;
+fail_pkram_load:
+	pkram_finish_load(&ps);
+	return -1;
+}
+
 static struct keepalive_state *find_keepalive_state(int bus, int devfn)
 {
 	struct keepalive_state *state;
@@ -2890,6 +2978,8 @@ static int __init vfio_pci_init(void)
 	ret = vfio_pci_init_perm_bits();
 	if (ret)
 		return ret;
+
+	vfio_pci_pkram_load();
 
 	/* Register and scan for devices */
 	ret = pci_register_driver(&vfio_pci_driver);
