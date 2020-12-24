@@ -6854,6 +6854,8 @@ static int iommu_load_keepalive_devinfo(struct pkram_stream *ps)
 	INIT_LIST_HEAD(&dd->devinfo_list);
 	for (i = 0; i < dd->devinfo_cnt; i++) {
 		devinfo = kmalloc(sizeof(*devinfo), GFP_KERNEL);
+		if (!devinfo)
+			goto fail_free_dd;
 		ret = pkram_load_chunk(ps, devinfo, sizeof(*devinfo));
 		if (ret)
 			goto fail_free_devinfo;
