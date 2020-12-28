@@ -7423,7 +7423,6 @@ static struct intel_iommu_state *
 intel_iommu_pkram_load_state(struct pkram_stream *ps)
 {
 	struct intel_iommu_state *state;
-	unsigned long *domain_ids;
 	struct page *page;
 	int i, ret;
 
@@ -7434,13 +7433,12 @@ intel_iommu_pkram_load_state(struct pkram_stream *ps)
 	if (ret)
 		goto fail_free_state;
 
-	domain_ids = kmalloc(state->domain_ids_size, GFP_KERNEL);
-	if (!domain_ids)
+	state->domain_ids = kmalloc(state->domain_ids_size, GFP_KERNEL);
+	if (!state->domain_ids)
 		goto fail_free_state;
-	ret = pkram_load_chunk(ps, domain_ids, state->domain_ids_size);
+	ret = pkram_load_chunk(ps, state->domain_ids, state->domain_ids_size);
 	if (ret)
 		goto fail_free_state;
-	state->domain_ids = domain_ids;
 
 	state->root_entry_page = pkram_load_page(ps, NULL, NULL);
 	if (!state->root_entry_page)
