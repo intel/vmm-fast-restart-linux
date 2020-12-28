@@ -486,7 +486,7 @@ fail_pkram_load:
 					 struct vmx_keepalive_state,
 					 list);
 		if (state->page)
-			__free_page(page);
+			__free_page(state->page);
 		list_del(&state->list);
 		kfree(state);
 	}
