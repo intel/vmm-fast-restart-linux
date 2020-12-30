@@ -5924,7 +5924,8 @@ static struct iommu_device *intel_iommu_probe_device(struct device *dev)
 	if (!iommu)
 		return ERR_PTR(-ENODEV);
 
-	if (translation_pre_enabled(iommu))
+	if (translation_pre_enabled(iommu) ||
+	    (dev_is_pci(dev) && pci_is_keepalive_dev(to_pci_dev(dev))))
 		dev_iommu_priv_set(dev, DEFER_DEVICE_DOMAIN_INFO);
 
 	return &iommu->iommu;
