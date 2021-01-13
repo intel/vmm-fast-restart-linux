@@ -658,7 +658,7 @@ int pkram_prepare_save_obj(struct pkram_stream *ps)
 
 	BUG_ON((node->flags & PKRAM_ACCMODE_MASK) != PKRAM_SAVE);
 
-	page = pkram_alloc_page(GFP_KERNEL | __GFP_ZERO);
+	page = pkram_alloc_page(ps->gfp_mask | __GFP_ZERO);
 	if (!page)
 		return -ENOMEM;
 	obj = page_address(page);
