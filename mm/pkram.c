@@ -1379,7 +1379,7 @@ module_init(pkram_init);
 
 static unsigned long *pkram_alloc_pte_bitmap(void)
 {
-	return page_address(__pkram_alloc_page(GFP_KERNEL | __GFP_ZERO, false));
+	return page_address(__pkram_alloc_page(GFP_ATOMIC | __GFP_ZERO, false));
 }
 
 static void pkram_free_pte_bitmap(void *bitmap)
@@ -1408,7 +1408,7 @@ static int pkram_add_identity_map(struct page *page)
 	if (!pkram_pgd) {
 		spin_lock(&pkram_pgd_lock);
 		if (!pkram_pgd) {
-			pg = __pkram_alloc_page(GFP_KERNEL | __GFP_ZERO, false);
+			pg = __pkram_alloc_page(GFP_ATOMIC | __GFP_ZERO, false);
 			if (!pg)
 				goto err;
 			pkram_pgd = page_address(pg);
@@ -1423,7 +1423,7 @@ again:
 	if (pgd_none(*pgd)) {
 		spin_lock(&pkram_pgd_lock);
 		if (pgd_none(*pgd)) {
-			pg = __pkram_alloc_page(GFP_KERNEL|__GFP_ZERO, false);
+			pg = __pkram_alloc_page(GFP_ATOMIC|__GFP_ZERO, false);
 			if (!pg)
 				goto err;
 			list_add(&pg->lru, &list);
@@ -1436,7 +1436,7 @@ again:
 	if (p4d_none(*p4d)) {
 		spin_lock(&pkram_pgd_lock);
 		if (p4d_none(*p4d)) {
-			pg = __pkram_alloc_page(GFP_KERNEL|__GFP_ZERO, false);
+			pg = __pkram_alloc_page(GFP_ATOMIC|__GFP_ZERO, false);
 			if (!pg)
 				goto err;
 			list_add(&pg->lru, &list);
@@ -1449,7 +1449,7 @@ again:
 	if (pud_none(*pud)) {
 		spin_lock(&pkram_pgd_lock);
 		if (pud_none(*pud)) {
-			pg = __pkram_alloc_page(GFP_KERNEL|__GFP_ZERO, false);
+			pg = __pkram_alloc_page(GFP_ATOMIC|__GFP_ZERO, false);
 			if (!pg)
 				goto err;
 			list_add(&pg->lru, &list);
