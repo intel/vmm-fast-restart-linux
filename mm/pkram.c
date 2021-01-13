@@ -1190,7 +1190,7 @@ int pkram_save_chunk(struct pkram_stream *ps, const void *buf, size_t size)
 		size_t sz, remain;
 
 		if (!ps->chunk_page) {
-			page = alloc_page(GFP_KERNEL);
+			page = alloc_page(ps->gfp_mask);
 			if (!page)
 				return -ENOMEM;
 			ret = pkram_save_page(ps, page, 0);
