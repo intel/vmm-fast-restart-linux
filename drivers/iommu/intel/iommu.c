@@ -7307,3 +7307,10 @@ static int __init intel_iommu_save_init(void)
 }
 device_initcall(intel_iommu_save_init);
 
+static int __init intel_iommu_finish_keepalive_load(void)
+{
+	free_keepalive_devices();
+
+	return 0;
+}
+device_initcall(intel_iommu_finish_keepalive_load);
