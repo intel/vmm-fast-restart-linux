@@ -608,6 +608,9 @@ struct intel_iommu {
 	u32		flags;      /* Software defined flags */
 
 	struct dmar_drhd_unit *drhd;
+
+	struct list_head devinfo_list;
+	bool keepalive;
 };
 
 /* PCI domain-device relationship */
