@@ -42,6 +42,7 @@
 #include <linux/crash_dump.h>
 #include <linux/numa.h>
 #include <linux/swiotlb.h>
+#include <linux/reboot.h>
 #include <asm/irq_remapping.h>
 #include <asm/cacheflush.h>
 #include <asm/iommu.h>
@@ -6464,3 +6465,21 @@ static void __init check_tylersburg_isoch(void)
 	pr_warn("Recommended TLB entries for ISOCH unit is 16; your BIOS set %d\n",
 	       vtisochctrl);
 }
+static int intel_iommu_save_callback(struct notifier_block *notifier,
+				  unsigned long val, void *v)
+{
+	return NOTIFY_OK;
+}
+
+static struct notifier_block intel_iommu_save_notifier = {
+	.notifier_call = intel_iommu_save_callback,
+	.priority = 1,
+};
+
+static int __init intel_iommu_save_init(void)
+{
+	register_live_update_notifier(&intel_iommu_save_notifier);
+	return 0;
+}
+device_initcall(intel_iommu_save_init);
+
