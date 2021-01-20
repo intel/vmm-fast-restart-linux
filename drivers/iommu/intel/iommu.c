@@ -2610,10 +2610,39 @@ static bool dev_is_real_dma_subdevice(struct device *dev)
 	       pci_real_dma_dev(to_pci_dev(dev)) != to_pci_dev(dev);
 }
 
+static struct device_domain_info *
+iommu_find_keepalive_devinfo(struct intel_iommu *iommu,
+			     struct device_domain_info *info)
+{
+	struct device_domain_info *d;
+
+	assert_spin_locked(&iommu->lock);
+
+	list_for_each_entry(d, &iommu->devinfo_list, global) {
+		if (d->segment == info->segment &&
+		    d->bus == info->bus &&
+		    d->devfn == info->devfn)
+			return d;
+	}
+	return NULL;
+}
+
+static void iommu_unlink_keepalive_devinfo(struct intel_iommu *iommu,
+					   struct device_domain_info *info)
+{
+	assert_spin_locked(&iommu->lock);
+
+	list_del(&info->global);
+	kfree(info);
+	if (list_empty(&iommu->devinfo_list))
+		iommu->keepalive = false;
+}
+
 static int domain_keepalive_reattach_iommu(struct dmar_domain *domain,
 					   struct intel_iommu *iommu,
 					   struct device_domain_info *info)
 {
+	struct device_domain_info *ddi;
 	struct context_entry *context;
 	unsigned int translation;
 	struct dma_pte *pgd;
@@ -2621,6 +2650,12 @@ static int domain_keepalive_reattach_iommu(struct dmar_domain *domain,
 
 	assert_spin_locked(&device_domain_lock);
 	assert_spin_locked(&iommu->lock);
+
+	ddi = iommu_find_keepalive_devinfo(iommu, info);
+	if (!ddi) {
+		pr_warn("can't find device in iommu keepalive device list\n");
+		return -ENODEV;
+	}
 
 	context = iommu_context_addr(iommu, info->bus, info->devfn, 0);
 	if (!context || !context_present(context)) {
@@ -2656,6 +2691,8 @@ static int domain_keepalive_reattach_iommu(struct dmar_domain *domain,
 	set_iommu_domain(iommu, domain_id, domain);
 	domain->nid = iommu->node;
 	domain_update_iommu_cap(domain);
+
+	iommu_unlink_keepalive_devinfo(iommu, ddi);
 
 	return 0;
 }
