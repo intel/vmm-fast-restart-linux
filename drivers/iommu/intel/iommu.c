@@ -4831,8 +4831,11 @@ static void intel_disable_iommus(void)
 	struct intel_iommu *iommu = NULL;
 	struct dmar_drhd_unit *drhd;
 
-	for_each_iommu(iommu, drhd)
+	for_each_iommu(iommu, drhd) {
+		if (iommu->keepalive)
+			continue;
 		iommu_disable_translation(iommu);
+	}
 }
 
 void intel_iommu_shutdown(void)
