@@ -4849,8 +4849,11 @@ void intel_iommu_shutdown(void)
 	down_write(&dmar_global_lock);
 
 	/* Disable PMRs explicitly here. */
-	for_each_iommu(iommu, drhd)
+	for_each_iommu(iommu, drhd) {
 		iommu_disable_protect_mem_regions(iommu);
+		if (iommu->keepalive)
+			iommu_disable_fault_handling(iommu);
+	}
 
 	/* Make sure the IOMMUs are switched off */
 	intel_disable_iommus();
