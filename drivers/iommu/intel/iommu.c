@@ -6491,6 +6491,35 @@ devinfo_out:
 	return ret;
 }
 
+static int intel_iommu_pkram_load_one_devinfo(struct pkram_stream *ps,
+					      struct intel_iommu_state *state)
+{
+	struct device_domain_info *devinfo;
+	int cnt, ret;
+
+	ret = pkram_load_chunk(ps, &cnt, sizeof(int));
+	if (ret)
+		return ret;
+	INIT_LIST_HEAD(&state->devinfo_list);
+	while (cnt--) {
+		devinfo = kmalloc(sizeof(*devinfo), GFP_KERNEL);
+		if (!devinfo) {
+			ret = -ENOMEM;
+			goto fail_free_list;
+		}
+		ret = pkram_load_chunk(ps, devinfo, sizeof(*devinfo));
+		if (ret)
+			goto fail_free_devinfo;
+		list_add_tail(&devinfo->global, &state->devinfo_list);
+	}
+
+	return 0;
+fail_free_devinfo:
+	kfree(devinfo);
+fail_free_list:
+	return ret;
+}
+
 static int devinfo_get_domain_id(struct device_domain_info *info, u16 *did)
 {
 	struct context_entry *context;
@@ -6747,6 +6776,47 @@ fail_pkram_save:
 	return ret;
 }
 
+static int intel_iommu_pkram_load_devinfo(struct intel_iommu_state *state)
+{
+	struct pkram_stream ps;
+	char devinfo_name[128];
+	int ret;
+
+	snprintf(devinfo_name, 128, "intel-iommu-devinfo-%d", state->seq_id);
+	ret = pkram_prepare_load(&ps, devinfo_name);
+	if (ret)
+		return ret;
+	pkram_prepare_load_obj(&ps);
+	ret = intel_iommu_pkram_load_one_devinfo(&ps, state);
+	if (ret) {
+		pr_warn("failed to load devinfo\n");
+		pkram_finish_load(&ps);
+		return ret;
+	}
+	pkram_finish_load_obj(&ps);
+
+	return 0;
+}
+
+static int intel_iommu_load_devinfo(void)
+{
+	struct intel_iommu_state *state;
+	int ret;
+
+	mutex_lock(&intel_iommu_state_lock);
+	list_for_each_entry(state, &intel_iommu_state_list, list) {
+ 		ret = intel_iommu_pkram_load_devinfo(state);
+		if (ret) {
+			pr_warn("failed to load devinfo\n");
+			mutex_unlock(&intel_iommu_state_lock);
+			return ret;
+		}
+	}
+	mutex_unlock(&intel_iommu_state_lock);
+
+	return 0;
+}
+
 static int intel_iommu_load_state(void)
 {
 	struct intel_iommu_state *state;
@@ -6782,6 +6852,9 @@ int intel_iommu_pkram_load()
 	int ret;
 
 	ret = intel_iommu_load_state();
+	ret = intel_iommu_load_devinfo();
+	if (ret)
+		return ret;
 	if (ret)
 		return ret;
 	return 0;
