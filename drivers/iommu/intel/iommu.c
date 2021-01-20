@@ -6603,6 +6603,11 @@ fail_pkram_save:
 	return ret;
 }
 
+int intel_iommu_pkram_load()
+{
+	return 0;
+}
+
 static int intel_iommu_save_callback(struct notifier_block *notifier,
 				  unsigned long val, void *v)
 {
