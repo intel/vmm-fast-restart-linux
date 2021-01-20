@@ -6559,6 +6559,34 @@ static int intel_iommu_pkram_save_pte(struct pkram_stream *ps, struct dma_pte *p
 	return 0;
 }
 
+static int intel_iommu_pkram_load_pte(struct pkram_stream *ps, struct dma_pte *pte, int level)
+{
+	struct page *page;
+	struct dma_pte *child;
+	int ret;
+
+	if (!pte)
+		return 0;
+
+	page = pkram_load_page(ps, NULL, NULL);
+	if (!page)
+		return -ENOENT;
+	level--;
+
+	if (level) {
+		int i;
+		for (i = 0; i < BIT_ULL(VTD_STRIDE_SHIFT); i++) {
+			if (!dma_pte_present(pte + i) || dma_pte_superpage(pte + i))
+				continue;
+			child = phys_to_virt(dma_pte_addr(pte + i));
+			ret = intel_iommu_pkram_load_pte(ps, child, level);
+			if (ret)
+				return ret;
+		}
+	}
+	return 0;
+}
+
 static int save_context_table_cb(struct device_domain_info *info, void *data)
 {
 	struct context_entry *context;
@@ -6634,6 +6662,118 @@ out_next_devfn:
 	return 0;
 }
 
+static void clear_until_bus_devfn(struct iter_ctx *ctx, u8 bus, u8 devfn)
+{
+	struct context_entry *context;
+
+	/*
+	 * We need to use "zero" as the final bdf delimiter to clear the
+	 * entries whose bdf seats after all keepalive devices.
+	 *
+	 * BDFs in keepalive devinfo list are sorted, so we can use "not equal".
+	 */
+	if (ctx->next_bus != bus) {
+		context = phys_to_virt(ctx->root[ctx->next_bus].lo &
+				       VTD_PAGE_MASK);
+		if (ctx->next_devfn) {
+			while (ctx->next_devfn) {
+				context[ctx->next_devfn].lo = 0;
+				context[ctx->next_devfn].hi = 0;
+				ctx->next_devfn++;
+			}
+			ctx->next_bus++;
+		}
+
+		while (ctx->next_bus != bus) {
+			ctx->root[ctx->next_bus].lo = 0;
+			ctx->root[ctx->next_bus].hi = 0;
+			ctx->next_bus++;
+		}
+
+		ctx->next_devfn = 0;
+		ctx->bus_context_done = false;
+	}
+
+	/* entries until devfn in the same bus should be non-present */
+	context = phys_to_virt(ctx->root[ctx->next_bus].lo & VTD_PAGE_MASK);
+	BUG_ON(!context);
+	BUG_ON(ctx->next_devfn > devfn);
+	while (ctx->next_devfn != devfn) {
+		context[ctx->next_devfn].lo = 0;
+		context[ctx->next_devfn].hi = 0;
+		ctx->next_devfn++;
+	}
+}
+
+static int load_context_table_cb(struct device_domain_info *devinfo, void *data)
+{
+	struct context_entry *context;
+	struct iter_ctx *ctx = data;
+	struct page *page;
+	unsigned long pgd;
+	u8 bus, devfn;
+	int i, ret;
+
+	bus = devinfo->bus;
+	devfn = devinfo->devfn;
+
+	clear_until_bus_devfn(ctx, bus, devfn);
+
+	context = phys_to_virt(ctx->root[ctx->next_bus].lo &
+			       VTD_PAGE_MASK);
+	if (!context)
+		return -ENOENT;
+
+	/* ctx->next_bus == bus, load context table first */
+	if (!ctx->bus_context_done) {
+		page = pkram_load_page(ctx->ps, NULL, NULL);
+		if (!page)
+			return -ENOENT;
+		ctx->bus_context_done = true;
+	}
+
+	/* ctx->next_devfn == devfn in the same bus */
+	if (!(context[ctx->next_devfn].lo & 0x1))
+		return -ENOENT;
+
+	/* does this page table loaded already? */
+	pgd = context[ctx->next_devfn].lo & VTD_PAGE_MASK;
+
+	for (i = 0; i < ctx->pgd_cnt; i++) {
+		if (pgd == ctx->pgd_cache[i]) {
+			pr_info("%s: pgd %lx already loaded\n", __func__, pgd);
+			goto out_next_devfn;
+		}
+	}
+
+	/* load the page table */
+	ret = intel_iommu_pkram_load_pte(ctx->ps, phys_to_virt(pgd),
+					 agaw_to_level(ctx->agaw));
+	if (ret)
+		return ret;
+
+	/* record in cache */
+	if (ctx->pgd_cnt == ctx->pgd_size) {
+		int size = ctx->pgd_size << 1;
+		ctx->pgd_cache = krealloc(ctx->pgd_cache, size * sizeof(u64),
+					  GFP_KERNEL);
+		if (!ctx->pgd_cache)
+			return -ENOMEM;
+		ctx->pgd_size = size;
+	}
+	ctx->pgd_cache[ctx->pgd_cnt] = pgd;
+	ctx->pgd_cnt++;
+
+out_next_devfn:
+	ctx->next_devfn++;
+	if (ctx->next_devfn == 0) {
+		ctx->next_bus++;
+		ctx->bus_context_done = false;
+	}
+
+	return 0;
+}
+
 static int intel_iommu_pkram_save_one_root_table(struct pkram_stream *ps,
 						 struct intel_iommu *iommu)
 {
@@ -6668,6 +6808,45 @@ static int intel_iommu_pkram_save_one_root_table(struct pkram_stream *ps,
 	}
 	spin_unlock(&device_domain_lock);
 
+	kfree(ctx.pgd_cache);
+	return ret;
+}
+
+static int intel_iommu_pkram_load_one_root_table(struct pkram_stream *ps,
+						 struct intel_iommu_state *state)
+{
+	struct device_domain_info *info;
+	struct iter_ctx ctx;
+	struct page *page;
+	int ret;
+
+	page = pkram_load_page(ps, NULL, NULL);
+	if (!page)
+		return -ENOENT;
+	state->root_entry_page = page;
+
+	ctx.ps = ps;
+	ctx.root = page_to_virt(state->root_entry_page);
+	ctx.agaw = state->agaw;
+	ctx.next_bus = 0;
+	ctx.next_devfn = 0;
+	ctx.bus_context_done = false;
+	ctx.pgd_cnt = 0;
+	ctx.pgd_size = 512;
+	ctx.pgd_cache = kmalloc(sizeof(u64) * ctx.pgd_size, GFP_KERNEL);
+	if (!ctx.pgd_cache)
+		return -ENOMEM;
+
+	list_for_each_entry(info, &state->devinfo_list, global) {
+		ret = load_context_table_cb(info, &ctx);
+		if (ret)
+			goto fail_free_pgd_cache;
+	}
+	clear_until_bus_devfn(&ctx, 0, 0);
+
+	kfree(ctx.pgd_cache);
+	return 0;
+fail_free_pgd_cache:
 	kfree(ctx.pgd_cache);
 	return ret;
 }
@@ -6973,6 +7152,47 @@ fail_pkram_save:
 	return ret;
 }
 
+static int intel_iommu_pkram_load_root_table(struct intel_iommu_state *state)
+{
+	struct pkram_stream ps;
+	char root_table_name[128];
+	int ret;
+
+	snprintf(root_table_name, 128, "intel-iommu-root-table-%d", state->seq_id);
+	ret = pkram_prepare_load(&ps, root_table_name);
+	if (ret)
+		return ret;
+	pkram_prepare_load_obj(&ps);
+	ret = intel_iommu_pkram_load_one_root_table(&ps, state);
+	if (ret) {
+		pr_info("failed to load root table\n");
+		pkram_finish_load(&ps);
+		return ret;
+	}
+	pkram_finish_load_obj(&ps);
+
+	return 0;
+}
+
+static int intel_iommu_load_root_table(void)
+{
+	struct intel_iommu_state *state;
+	int ret;
+
+	mutex_lock(&intel_iommu_state_lock);
+	list_for_each_entry(state, &intel_iommu_state_list, list) {
+ 		ret = intel_iommu_pkram_load_root_table(state);
+		if (ret) {
+			pr_info("failed to load root table\n");
+			mutex_unlock(&intel_iommu_state_lock);
+			return ret;
+		}
+	}
+	mutex_unlock(&intel_iommu_state_lock);
+
+	return 0;
+}
+
 static int intel_iommu_pkram_load_devinfo(struct intel_iommu_state *state)
 {
 	struct pkram_stream ps;
@@ -7049,9 +7269,12 @@ int intel_iommu_pkram_load()
 	int ret;
 
 	ret = intel_iommu_load_state();
+	if (ret)
+		return ret;
 	ret = intel_iommu_load_devinfo();
 	if (ret)
 		return ret;
+	ret = intel_iommu_load_root_table();
 	if (ret)
 		return ret;
 	return 0;
