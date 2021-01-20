@@ -713,6 +713,9 @@ static void iommu_disable_irq_remapping(struct intel_iommu *iommu)
 	 */
 	qi_global_iec(iommu);
 
+	if (iommu->keepalive)
+		return;
+
 	raw_spin_lock_irqsave(&iommu->register_lock, flags);
 
 	sts = readl(iommu->reg + DMAR_GSTS_REG);
