@@ -42,6 +42,7 @@
 #include <linux/crash_dump.h>
 #include <linux/numa.h>
 #include <linux/swiotlb.h>
+#include <linux/pkram.h>
 #include <linux/reboot.h>
 #include <asm/irq_remapping.h>
 #include <asm/cacheflush.h>
@@ -6465,9 +6466,149 @@ static void __init check_tylersburg_isoch(void)
 	pr_warn("Recommended TLB entries for ISOCH unit is 16; your BIOS set %d\n",
 	       vtisochctrl);
 }
+static int devinfo_get_domain_id(struct device_domain_info *info, u16 *did)
+{
+	struct context_entry *context;
+
+	context = iommu_context_addr(info->iommu, info->bus, info->devfn, 0);
+	if (!context || !context_present(context)) {
+		pr_warn("context present bit is not set\n");
+		return -ENOENT;
+	}
+
+	*did = context_domain_id(context);
+	return 0;
+}
+
+static int iommu_set_domain_id_bit(struct intel_iommu *iommu,
+				   struct device_domain_info *info,
+				   unsigned long *domain_ids)
+{
+	struct device *dev = info->dev;
+	struct pci_dev *pdev;
+	u16 did;
+
+	if (!dev_is_pci(dev) || !dev_is_keepalive(dev))
+		return 0;
+	pdev = to_pci_dev(dev);
+	if (pci_is_bridge(pdev))
+		return 0;
+	if (devinfo_get_domain_id(info, &did) != 0)
+		return 0;
+	set_bit(did, domain_ids);
+
+	return 0;
+}
+
+static int iommu_get_keepalive_domain_ids(struct intel_iommu *iommu,
+					  unsigned long *domain_ids)
+{
+	struct device_domain_info *info;
+	int ret;
+
+	list_for_each_entry(info, &iommu->devinfo_list, global) {
+		ret = iommu_set_domain_id_bit(iommu, info, domain_ids);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
+static int intel_iommu_pkram_save_one_state(struct pkram_stream *ps,
+					    struct intel_iommu *iommu)
+{
+	struct intel_iommu_state state;
+	unsigned long *domain_ids;
+	void *base;
+	int i, ret;
+
+	memset(&state, 0, sizeof(state));
+	state.reg_phys = iommu->reg_phys;
+	state.seq_id = iommu->seq_id;
+	state.segment = iommu->segment;
+	state.agaw = iommu->agaw;
+	state.qi_free_head = iommu->qi->free_head;
+	state.qi_free_tail = iommu->qi->free_tail;
+	state.qi_free_cnt = iommu->qi->free_cnt;
+	state.domain_ids_size = BITS_TO_LONGS(cap_ndoms(iommu->cap)) * sizeof(unsigned long);
+
+	ret = pkram_save_chunk(ps, &state, sizeof(state));
+	if (ret)
+		return ret;
+
+	domain_ids = kzalloc(state.domain_ids_size, GFP_KERNEL);
+	if (!domain_ids)
+		return -ENOMEM;
+	ret = iommu_get_keepalive_domain_ids(iommu, domain_ids);
+	if (ret)
+		return ret;
+	ret = pkram_save_chunk(ps, domain_ids, state.domain_ids_size);
+	if (ret)
+		return ret;
+	kfree(domain_ids);
+
+	ret = pkram_save_page(ps, virt_to_page(iommu->root_entry), 0);
+	if (ret)
+		return ret;
+
+	ret = pkram_save_page(ps, virt_to_page(iommu->qi->desc), 0);
+	if (ret)
+		return ret;
+
+	ret = pkram_save_page(ps, virt_to_page(iommu->qi->desc_status), 0);
+	if (ret)
+		return ret;
+
+	base = iommu->ir_table->base;
+	for (i = 0; i < (1 << INTR_REMAP_PAGE_ORDER); i++) {
+		ret = pkram_save_page(ps, virt_to_page(base + PAGE_SIZE * i), 0);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+int intel_iommu_pkram_save_state(void)
+{
+	struct dmar_drhd_unit *drhd;
+	struct intel_iommu *iommu;
+	struct pkram_stream ps;
+	int ret;
+
+	ret = pkram_prepare_save(&ps, "intel-iommu", GFP_KERNEL);
+	if (ret)
+		return ret;
+
+	down_write(&dmar_global_lock);
+	for_each_iommu(iommu, drhd) {
+		if (!iommu->keepalive)
+			continue;
+		pkram_prepare_save_obj(&ps);
+		ret = intel_iommu_pkram_save_one_state(&ps, iommu);
+		if (ret) {
+			pr_info("failed to save state\n");
+			goto fail_pkram_save;
+		}
+		pkram_finish_save_obj(&ps);
+	}
+	up_write(&dmar_global_lock);
+
+	pkram_finish_save(&ps);
+	return 0;
+fail_pkram_save:
+	pkram_finish_save_obj(&ps);
+	up_write(&dmar_global_lock);
+	pkram_discard_save(&ps);
+	return ret;
+}
+
 static int intel_iommu_save_callback(struct notifier_block *notifier,
 				  unsigned long val, void *v)
 {
+	if (intel_iommu_pkram_save_state()) {
+		pr_warn("failed to save intel iommu state \n");
+	}
 	return NOTIFY_OK;
 }
 
