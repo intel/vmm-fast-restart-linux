@@ -5118,6 +5118,27 @@ static void domain_keepalive_detach_iommu(struct dmar_domain *domain,
 	}
 }
 
+static void iommu_link_keepalive_devinfo(struct intel_iommu *iommu,
+					 struct device_domain_info *info)
+{
+	struct device_domain_info *d;
+	u64 key;
+
+	assert_spin_locked(&iommu->lock);
+
+	key = ((u64)info->segment) << 32 |
+		((u64)info->bus) << 8 | info->devfn;
+
+	list_for_each_entry(d, &iommu->devinfo_list, global) {
+		u64 key2 = ((u64)d->segment) << 32 | ((u64)d->bus) << 8 | d->devfn;
+
+		if (key < key2)
+			break;
+	}
+	list_add_tail(&info->global, &d->global);
+	iommu->keepalive = true;
+}
+
 static void __dmar_remove_one_dev_info(struct device_domain_info *info)
 {
 	struct dmar_domain *domain;
@@ -5136,8 +5157,8 @@ static void __dmar_remove_one_dev_info(struct device_domain_info *info)
 		unlink_domain_info(info);
 		spin_lock_irqsave(&iommu->lock, flags);
 		domain_keepalive_detach_iommu(domain, iommu, info);
+		iommu_link_keepalive_devinfo(iommu, info);
 		spin_unlock_irqrestore(&iommu->lock, flags);
-		free_devinfo_mem(info);
 		return;
 	}
 
